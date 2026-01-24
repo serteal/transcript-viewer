@@ -1,0 +1,1443 @@
+<script lang="ts">
+	import type {
+		MessageWithMetadata,
+		Content,
+		Message,
+		ContentToolUse,
+		ChatMessageTool,
+		ToolCall,
+		ContentReasoning,
+		UserComment,
+		UserHighlight
+	} from '$lib/shared/types';
+	import { Eye, Clipboard, FileText, Database, Wrench, Link, MessageSquare, Star, ChevronRight } from 'lucide-svelte';
+	import HighlightedText from '$lib/client/components/citations/HighlightedText.svelte';
+	import HighlightedMarkdown from '$lib/client/components/citations/HighlightedMarkdown.svelte';
+	import SelectionPopup from '$lib/client/components/transcript/SelectionPopup.svelte';
+	import type { CopyAction } from '$lib/client/utils/copy-utils';
+
+	// =============================================================================
+	// Props & State
+	// =============================================================================
+
+	let {
+		msg,
+		isOpen = true,
+		isVisible = true,
+		onToggle,
+		messageIndex,
+		columnIndex,
+		renderMarkdown = true,
+		onCopy,
+		filePath,
+		transcriptId,
+		comments = [],
+		highlights = [],
+		onAddComment,
+		onDeleteComment,
+		onAddHighlight,
+		onOpenCommentModal
+	}: {
+		msg: MessageWithMetadata;
+		isOpen?: boolean;
+		isVisible?: boolean;
+		onToggle?: () => void;
+		messageIndex?: number;
+		columnIndex?: number;
+		renderMarkdown?: boolean;
+		onCopy?: (action: CopyAction) => void;
+		filePath?: string;
+		transcriptId?: string;
+		comments?: UserComment[];
+		highlights?: UserHighlight[];
+		onAddComment?: (messageId: string, text: string, quotedText?: string) => Promise<void>;
+		onDeleteComment?: (commentId: string) => Promise<void>;
+		onAddHighlight?: (messageId: string, quotedText: string) => void;
+		onOpenCommentModal?: (messageId: string, quotedText: string) => void;
+	} = $props();
+
+	const expanded = $derived(isOpen);
+	let showRawJson = $state(false);
+	let menuOpen = $state(false);
+	let copySubmenuOpen = $state(false);
+	let menuBtnRef: HTMLButtonElement | null = $state(null);
+	let menuRef: HTMLDivElement | null = $state(null);
+	let menuPosition = $state<{ top: number; right: number } | null>(null);
+	let collapsedToolCallById: Record<string, boolean> = $state({});
+	let showCommentForm = $state(false);
+	let commentText = $state('');
+	let submittingComment = $state(false);
+
+	// Selection popup state
+	let selectionPopupVisible = $state(false);
+	let selectedText = $state('');
+	let selectionPosition = $state({ x: 0, y: 0 });
+	let quotedTextForComment = $state<string | null>(null);
+	let bodyRef: HTMLDivElement | null = $state(null);
+
+	// =============================================================================
+	// Effects
+	// =============================================================================
+
+	$effect(() => {
+		function onDocClick(e: MouseEvent) {
+			const t = e.target as Node;
+			if (menuOpen && t && !menuRef?.contains(t) && !menuBtnRef?.contains(t)) {
+				menuOpen = false;
+			}
+		}
+		document.addEventListener('click', onDocClick, true);
+		return () => document.removeEventListener('click', onDocClick, true);
+	});
+
+	// =============================================================================
+	// Helpers
+	// =============================================================================
+
+	function isToolCallCollapsed(id: string): boolean {
+		return !!collapsedToolCallById[id];
+	}
+
+	function toggleToolCallCollapsed(id: string) {
+		collapsedToolCallById[id] = !collapsedToolCallById[id];
+	}
+
+	function getMessageSourceLabel(message: Message): string | null {
+		const meta = message.metadata;
+		if (meta && typeof meta === 'object' && 'source' in meta) {
+			const v = (meta as Record<string, unknown>)['source'];
+			if (typeof v === 'string' && v) return v;
+		}
+		if (message.role === 'tool') {
+			return (message as ChatMessageTool).function || null;
+		}
+		return null;
+	}
+
+	function getAssistantToolCalls(m: Message): ToolCall[] {
+		return m.role === 'assistant' && m.tool_calls ? m.tool_calls : [];
+	}
+
+	function hashStringToColor(
+		str: string
+	): 'primary' | 'secondary' | 'accent' | 'info' | 'success' | 'warning' | 'neutral' {
+		if (!str) return 'neutral';
+		let hash = 42;
+		for (let i = 0; i < str.length; i++) {
+			hash = ((hash << 5) - hash + str.charCodeAt(i)) | 0;
+		}
+		const colors = ['primary', 'secondary', 'accent', 'info', 'success', 'warning'] as const;
+		return colors[Math.abs(hash) % colors.length] || 'neutral';
+	}
+
+	const sourceLabel = $derived(getMessageSourceLabel(msg));
+	const sourceColor = $derived(hashStringToColor(sourceLabel || ''));
+
+	function renderContent(c: Content): string {
+		if (c.type === 'text') return c.text;
+		if (c.type === 'tool_use')
+			return JSON.stringify(
+				{
+					args: (c as ContentToolUse).arguments,
+					result: (c as ContentToolUse).result,
+					error: (c as ContentToolUse).error
+				},
+				null,
+				2
+			);
+		return `[${c.type}]`;
+	}
+
+	type ReasoningDisplayState = 'full' | 'summary' | 'redacted';
+
+	interface ReasoningDisplay {
+		text: string;
+		state: ReasoningDisplayState;
+		label: string;
+	}
+
+	function getReasoningDisplay(c: ContentReasoning): ReasoningDisplay {
+		if (c.redacted) {
+			if (c.summary) {
+				return { text: c.summary.trim(), state: 'summary', label: 'THINKING SUMMARY' };
+			}
+			return { text: '', state: 'redacted', label: 'THINKING REDACTED' };
+		}
+		return { text: c.reasoning, state: 'full', label: 'THINKING' };
+	}
+
+	// Minimal YAML-like serializer for readable tool args/results
+	function toYaml(value: unknown, indent: number = 0): string {
+		const pad = (n: number) => '  '.repeat(n);
+		const isPlainObject = (v: unknown) => Object.prototype.toString.call(v) === '[object Object]';
+
+		if (value === null || value === undefined) return 'null';
+
+		if (typeof value === 'string') {
+			let unescaped: string;
+			try {
+				unescaped = JSON.parse('"' + value.replace(/"/g, '\\"') + '"');
+			} catch {
+				unescaped = value;
+			}
+			if (unescaped.includes('\n')) {
+				return unescaped
+					.split('\n')
+					.map((l) => pad(indent + 1) + l)
+					.join('\n');
+			}
+			const needsQuotes =
+				/^[\s]*$|^[>|]|[:#\[\]{}*&!%@`]/.test(unescaped) ||
+				unescaped.startsWith('-') ||
+				/^\d/.test(unescaped) ||
+				['true', 'false', 'null', 'yes', 'no', 'on', 'off'].includes(unescaped.toLowerCase());
+			return needsQuotes ? JSON.stringify(unescaped) : unescaped;
+		}
+
+		if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+
+		if (Array.isArray(value)) {
+			if (value.length === 0) return '[]';
+			return value
+				.map((item) => {
+					const rendered = toYaml(item, indent + 1);
+					if (rendered.includes('\n')) {
+						const lines = rendered
+							.split('\n')
+							.map((l) => pad(indent + 1) + l)
+							.join('\n');
+						return `${pad(indent)}-\n${lines}`;
+					}
+					return `${pad(indent)}- ${rendered}`;
+				})
+				.join('\n');
+		}
+
+		if (isPlainObject(value)) {
+			const entries = Object.entries(value as Record<string, unknown>);
+			if (entries.length === 0) return '{}';
+			return entries
+				.map(([k, v]) => {
+					const rendered = toYaml(v, indent + 1);
+					if (rendered.includes('\n')) {
+						const lines = rendered
+							.split('\n')
+							.map((l) => pad(indent + 1) + l)
+							.join('\n');
+						return `${pad(indent)}${k}:\n${lines}`;
+					}
+					return `${pad(indent)}${k}: ${rendered}`;
+				})
+				.join('\n');
+		}
+
+		try {
+			return JSON.stringify(value, null, 2);
+		} catch {
+			return String(value);
+		}
+	}
+
+	// Menu action helper
+	function handleMenuCopy(e: MouseEvent, action: CopyAction) {
+		e.stopPropagation();
+		onCopy?.(action);
+		menuOpen = false;
+	}
+
+	function getMessageIndices() {
+		return {
+			idx: messageIndex ?? (msg.messageIndex ?? 0),
+			colIdx: columnIndex ?? 0
+		};
+	}
+
+	// Generate a stable message identifier (use id if available, otherwise column:index)
+	function getMessageIdentifier(): string {
+		if (msg.id) return msg.id;
+		const colIdx = columnIndex ?? 0;
+		const msgIdx = messageIndex ?? (msg.messageIndex ?? 0);
+		return `col${colIdx}:msg${msgIdx}`;
+	}
+
+	async function handleCommentSubmit(e: Event) {
+		e.preventDefault();
+		if (!commentText.trim() || !onAddComment) return;
+
+		submittingComment = true;
+		try {
+			await onAddComment(getMessageIdentifier(), commentText.trim(), quotedTextForComment || undefined);
+			commentText = '';
+			quotedTextForComment = null;
+			showCommentForm = false;
+		} catch (err) {
+			console.error('Failed to add comment:', err);
+		} finally {
+			submittingComment = false;
+		}
+	}
+
+	async function handleDeleteComment(commentId: string) {
+		if (!onDeleteComment) return;
+		try {
+			await onDeleteComment(commentId);
+		} catch (err) {
+			console.error('Failed to delete comment:', err);
+		}
+	}
+
+	// =============================================================================
+	// Selection Handling
+	// =============================================================================
+
+	function handleBodyMouseUp(e: MouseEvent) {
+		// Small delay to let selection finalize
+		setTimeout(() => {
+			const selection = window.getSelection();
+			const text = selection?.toString().trim();
+
+			if (text && text.length > 0 && bodyRef?.contains(selection?.anchorNode || null)) {
+				const range = selection?.getRangeAt(0);
+				if (range) {
+					const rect = range.getBoundingClientRect();
+					selectedText = text;
+					selectionPosition = {
+						x: rect.left + rect.width / 2,
+						y: rect.top
+					};
+					selectionPopupVisible = true;
+				}
+			}
+		}, 10);
+	}
+
+	// Keyboard shortcuts for comment (Cmd+U) and highlight (Cmd+I)
+	function handleKeydown(e: KeyboardEvent) {
+		if ((e.metaKey || e.ctrlKey) && (e.key === 'u' || e.key === 'i')) {
+			const selection = window.getSelection();
+			const text = selection?.toString().trim();
+
+			if (text && text.length > 0 && bodyRef?.contains(selection?.anchorNode || null)) {
+				e.preventDefault();
+				if (e.key === 'u') {
+					handleSelectionComment(text, getMessageIdentifier());
+				} else if (e.key === 'i') {
+					handleSelectionHighlight(text, getMessageIdentifier());
+				}
+			}
+		}
+	}
+
+	$effect(() => {
+		document.addEventListener('keydown', handleKeydown);
+		return () => document.removeEventListener('keydown', handleKeydown);
+	});
+
+	function handleSelectionComment(text: string, msgId: string) {
+		if (onOpenCommentModal) {
+			onOpenCommentModal(getMessageIdentifier(), text);
+		} else {
+			// Fallback to inline form if modal callback not provided
+			quotedTextForComment = text;
+			showCommentForm = true;
+		}
+		selectionPopupVisible = false;
+		window.getSelection()?.removeAllRanges();
+	}
+
+	function handleSelectionHighlight(text: string, msgId: string) {
+		if (onAddHighlight) {
+			onAddHighlight(getMessageIdentifier(), text);
+		}
+		selectionPopupVisible = false;
+		window.getSelection()?.removeAllRanges();
+	}
+
+	function handleSelectionCopy(text: string) {
+		navigator.clipboard.writeText(text);
+		selectionPopupVisible = false;
+		window.getSelection()?.removeAllRanges();
+	}
+
+	function closeSelectionPopup() {
+		selectionPopupVisible = false;
+		selectedText = '';
+	}
+</script>
+
+<article
+	class="card {msg.role === 'assistant' ? (sourceLabel?.toLowerCase() === 'auditor' ? 'bordercol-auditor leftedge-auditor' : `leftedge-${sourceColor} bordercol-${sourceColor}`) : ''} {msg.isShared ? 'shared' : ''} {isVisible ? '' : 'invisible pointer-events-none'}"
+	data-role={msg.role}
+	data-shared={msg.isShared ? '1' : undefined}
+	data-message-id={msg.id}
+	data-message-index={messageIndex}
+>
+	<header
+		class="head"
+		role="button"
+		tabindex="0"
+		onclick={() => onToggle?.()}
+		onkeydown={(e) =>
+			e.key === 'Enter' || e.key === ' ' ? (e.preventDefault(), onToggle?.()) : null}
+		aria-expanded={expanded}
+	>
+		<div class="badges">
+			{#if msg.messageIndex !== undefined}
+				<span class="badge idx">Message {msg.messageIndex + 1}</span>
+			{/if}
+			{#if sourceLabel}
+				<span class={`badge name ${sourceColor}`}>{sourceLabel.toUpperCase()}</span>
+			{/if}
+		</div>
+		<div class="actions">
+			<svg class={`chev ${expanded ? '' : 'rot'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+				<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+			</svg>
+			<button
+				class="menu-btn"
+				aria-label="Message menu"
+				bind:this={menuBtnRef}
+				onclick={(e) => {
+					e.stopPropagation();
+					if (!menuOpen) {
+						const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+						menuPosition = {
+							top: rect.bottom + 4,
+							right: window.innerWidth - rect.right
+						};
+					}
+					menuOpen = !menuOpen;
+				}}
+			>
+				<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="18" height="18">
+					<path d="M6 12a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0ZM13.5 12a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0ZM21 12a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0Z" />
+				</svg>
+			</button>
+			{#if menuOpen && menuPosition}
+				{@const { idx, colIdx } = getMessageIndices()}
+				<div
+					class="menu-pop"
+					bind:this={menuRef}
+					role="menu"
+					style="position: fixed; top: {menuPosition.top}px; right: {menuPosition.right}px;"
+				>
+					{#if onOpenCommentModal}
+						<button type="button" class="menu-item" onclick={(e) => { e.stopPropagation(); onOpenCommentModal(getMessageIdentifier(), ''); menuOpen = false; }}>
+							<MessageSquare class="mi" size={14} color="#6b7280" strokeWidth={1.25} />
+							<span>Comment</span>
+						</button>
+					{/if}
+					{#if onAddHighlight}
+						<button type="button" class="menu-item" onclick={(e) => { e.stopPropagation(); onAddHighlight(getMessageIdentifier(), '(Entire message)'); menuOpen = false; }}>
+							<Star class="mi highlight-star" size={14} strokeWidth={1.25} />
+							<span>Add to highlights</span>
+						</button>
+					{/if}
+					{#if onOpenCommentModal || onAddHighlight}
+						<div class="menu-divider"></div>
+					{/if}
+					<!-- Copy submenu -->
+					<div
+						class="menu-item-with-submenu"
+						onmouseenter={() => copySubmenuOpen = true}
+						onmouseleave={() => copySubmenuOpen = false}
+					>
+						<button
+							type="button"
+							class="menu-item has-submenu"
+						>
+							<Clipboard class="mi" size={14} color="#6b7280" strokeWidth={1.25} />
+							<span>Copy</span>
+							<ChevronRight class="submenu-arrow" size={14} />
+						</button>
+						{#if copySubmenuOpen}
+							<div
+								class="copy-submenu"
+								role="menu"
+							>
+								<button type="button" class="menu-item" onclick={(e) => handleMenuCopy(e, { type: 'single', message: msg })}>
+									<span>Copy message JSON</span>
+								</button>
+								<button type="button" class="menu-item" onclick={(e) => handleMenuCopy(e, { type: 'reference', columnIndex: colIdx, messageIndex: idx, filePath, transcriptId, messageId: msg.id ?? undefined })}>
+									<span>Copy event reference</span>
+								</button>
+								<div class="menu-divider"></div>
+								<button type="button" class="menu-item" onclick={(e) => handleMenuCopy(e, { type: 'history', columnIndex: colIdx, messageIndex: idx })}>
+									<span>Copy history up to msg</span>
+								</button>
+								<button type="button" class="menu-item" onclick={(e) => handleMenuCopy(e, { type: 'events', columnIndex: colIdx, messageIndex: idx })}>
+									<span>Copy events up to msg</span>
+								</button>
+								<button type="button" class="menu-item" onclick={(e) => handleMenuCopy(e, { type: 'tools', columnIndex: colIdx, messageIndex: idx })}>
+									<span>Copy tools up to msg</span>
+								</button>
+							</div>
+						{/if}
+					</div>
+					<div class="menu-divider"></div>
+					<button type="button" class="menu-item" onclick={(e) => { e.stopPropagation(); showRawJson = !showRawJson; menuOpen = false; }}>
+						<Eye class="mi" size={14} color="#6b7280" strokeWidth={1.25} />
+						<span>Toggle raw JSON</span>
+					</button>
+				</div>
+			{/if}
+		</div>
+	</header>
+
+	{#if expanded}
+		<div class="body" bind:this={bodyRef} onmouseup={handleBodyMouseUp}>
+			{#if showRawJson}
+				<pre class="pre">{JSON.stringify(msg, null, 2)}</pre>
+			{:else if msg.role === 'tool' && msg.error}
+				{@render toolErrorContent(msg)}
+			{:else}
+				{@render messageContent(msg)}
+				{#if msg.role === 'assistant' && getAssistantToolCalls(msg).length > 0}
+					<div class="toolcalls">
+						{@render toolCallsContent(msg, getAssistantToolCalls(msg))}
+					</div>
+				{/if}
+			{/if}
+		</div>
+	{/if}
+
+	<!-- Comments section -->
+	{#if comments.length > 0}
+		<div class="comments-section" data-comment-message-id={getMessageIdentifier()}>
+			{#each comments as comment}
+				<div class="comment">
+					<div class="comment-content">
+						{#if comment.quoted_text}
+							<span class="comment-quote">"{comment.quoted_text}"</span>
+						{/if}
+						<span class="comment-text">{comment.text}</span>
+						<span class="comment-meta">
+							{#if comment.author}{comment.author} · {/if}
+							{new Date(comment.created_at).toLocaleDateString()}
+						</span>
+					</div>
+					{#if onDeleteComment}
+						<button class="comment-delete" onclick={() => handleDeleteComment(comment.id)} aria-label="Delete comment">×</button>
+					{/if}
+				</div>
+			{/each}
+		</div>
+	{/if}
+
+	{#if showCommentForm}
+		<div class="comment-form">
+			<form onsubmit={handleCommentSubmit}>
+				{#if quotedTextForComment}
+					<div class="quoted-text-preview">
+						<span class="quote-label">Commenting on:</span>
+						<p class="quote-content">"{quotedTextForComment}"</p>
+					</div>
+				{/if}
+				<textarea
+					bind:value={commentText}
+					placeholder="Add a comment..."
+					rows="2"
+					disabled={submittingComment}
+					onkeydown={(e) => {
+						if (e.key === 'Escape') {
+							e.preventDefault();
+							showCommentForm = false;
+							commentText = '';
+							quotedTextForComment = null;
+						} else if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+							e.preventDefault();
+							if (commentText.trim() && onAddComment) {
+								handleCommentSubmit(e);
+							}
+						}
+					}}
+				></textarea>
+				<div class="comment-form-actions">
+					<span class="form-hint">⌘↵ save · esc cancel</span>
+					<button type="button" onclick={() => { showCommentForm = false; commentText = ''; quotedTextForComment = null; }}>Cancel</button>
+					<button type="submit" disabled={submittingComment || !commentText.trim()}>
+						{submittingComment ? 'Saving...' : 'Save'}
+					</button>
+				</div>
+			</form>
+		</div>
+	{/if}
+</article>
+
+{#if selectionPopupVisible}
+	<SelectionPopup
+		selectedText={selectedText}
+		messageId={getMessageIdentifier()}
+		position={selectionPosition}
+		onComment={handleSelectionComment}
+		onHighlight={handleSelectionHighlight}
+		onCopy={handleSelectionCopy}
+		onClose={closeSelectionPopup}
+	/>
+{/if}
+
+<!-- =============================================================================
+     SNIPPETS
+     ============================================================================= -->
+
+<!-- Render text with optional markdown and citation highlighting -->
+{#snippet renderText(message: MessageWithMetadata, text: string, wrapperClass: string = 'text')}
+	{#if renderMarkdown}
+		<HighlightedMarkdown {message} {text} class={wrapperClass} {comments} {highlights} />
+	{:else}
+		<p class="{wrapperClass} text-pre-wrap"><HighlightedText {message} {text} {comments} {highlights} /></p>
+	{/if}
+{/snippet}
+
+<!-- Render message content (handles string or Content[] array) -->
+{#snippet messageContent(message: MessageWithMetadata)}
+	{#if typeof message.content === 'string'}
+		{@render renderText(message, message.content)}
+	{:else}
+		{#each message.content as c}
+			{#if c.type === 'text'}
+				{@render renderText(message, renderContent(c))}
+			{:else if c.type === 'reasoning'}
+				{@render reasoningBlock(message, c as ContentReasoning)}
+			{/if}
+		{/each}
+	{/if}
+{/snippet}
+
+<!-- Reasoning block with redaction handling -->
+{#snippet reasoningBlock(message: MessageWithMetadata, reasoning: ContentReasoning)}
+	{@const display = getReasoningDisplay(reasoning)}
+	<div class="reasoning reasoning-{display.state}">
+		<div class="reasoning-header">
+			<span class="reasoning-badge {display.state}">{display.label}</span>
+		</div>
+		{#if display.text}
+			<div class="reasoning-content">
+				{@render renderText(message, display.text, 'prose')}
+			</div>
+		{/if}
+	</div>
+{/snippet}
+
+<!-- Tool error display -->
+{#snippet toolErrorContent(message: MessageWithMetadata)}
+	<div class="error-container">
+		<div class="error-header">
+			<span class="error-badge">ERROR</span>
+			{#if message.error?.type}
+				<span class="error-type">{message.error.type.toUpperCase()}</span>
+			{/if}
+		</div>
+		{#if message.error?.message}
+			<div class="error-message">
+				{@render renderText(message, message.error.message, 'error-text')}
+			</div>
+		{/if}
+	</div>
+{/snippet}
+
+<!-- Tool calls list -->
+{#snippet toolCallsContent(message: MessageWithMetadata, toolCalls: ToolCall[])}
+	{#each toolCalls as tc, i (tc.id ?? String(i))}
+		{@const tcId = tc.id ?? String(i)}
+		{#if i > 0}
+			<div class="tool-sep"></div>
+		{/if}
+		<div class="toolgrid">
+			<div class="tc-col-toggle">
+				<button
+					type="button"
+					class="tc-toggle"
+					aria-label="Toggle tool call"
+					aria-expanded={!isToolCallCollapsed(tcId)}
+					aria-controls={`toolcall-${tcId}`}
+					onclick={(e) => { e.stopPropagation(); toggleToolCallCollapsed(tcId); }}
+					onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); toggleToolCallCollapsed(tcId); } }}
+				>
+					<svg class={`tc-caret ${isToolCallCollapsed(tcId) ? 'rot-90' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+					</svg>
+				</button>
+			</div>
+			<div class="tc-col-content">
+				<div class="toolhdr">
+					<span class="toolbadge">TOOL</span>
+					<span class="toolname">{tc.function}</span>
+					{#if tc.id}
+						<span class="toolid">ID: {tc.id}</span>
+					{/if}
+				</div>
+			</div>
+			{#if !isToolCallCollapsed(tcId)}
+				<div class="tc-col-stick" aria-hidden="true"></div>
+				<div class="tc-col-body" id={`toolcall-${tcId}`}>
+					{#if tc.view}
+						{@render renderText(message, tc.view.content, 'prose')}
+					{:else}
+						<pre class="pre">{@render renderText(message, toYaml(tc.arguments), 'pre')}</pre>
+					{/if}
+				</div>
+			{/if}
+		</div>
+	{/each}
+{/snippet}
+
+<style>
+	/* =============================================================================
+	   CSS Variables for shared values
+	   ============================================================================= */
+	.card {
+		--color-primary: #3b82f6;
+		--color-secondary: #8b5cf6;
+		--color-accent: #ec4899;
+		--color-info: #0ea5e9;
+		--color-success: #10b981;
+		--color-warning: #f59e0b;
+		--color-neutral: #71717a;
+		--font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
+	}
+
+	/* =============================================================================
+	   Card Structure
+	   ============================================================================= */
+	.card {
+		border: 4px solid var(--color-border);
+		border-radius: 8px;
+		background: var(--color-surface);
+		overflow: visible;
+	}
+	.card.shared { border-style: dashed; }
+
+	/* Border colors by theme */
+	.bordercol-primary { border-color: var(--color-primary); }
+	.bordercol-secondary { border-color: var(--color-secondary); }
+	.bordercol-accent { border-color: var(--color-accent); }
+	.bordercol-info { border-color: var(--color-info); }
+	.bordercol-success { border-color: var(--color-success); }
+	.bordercol-warning { border-color: var(--color-warning); }
+	.bordercol-auditor { border-color: #22c55e; } /* green-500 for auditor */
+
+	/* System message - red border */
+	.card[data-role="system"] {
+		border-color: #dc2626;
+		border-left: 4px solid #dc2626;
+	}
+
+	/* Left edge accent */
+	.leftedge-primary { border-left: 4px solid var(--color-primary); }
+	.leftedge-secondary { border-left: 4px solid var(--color-secondary); }
+	.leftedge-accent { border-left: 4px solid var(--color-accent); }
+	.leftedge-info { border-left: 4px solid var(--color-info); }
+	.leftedge-success { border-left: 4px solid var(--color-success); }
+	.leftedge-warning { border-left: 4px solid var(--color-warning); }
+	.leftedge-neutral { border-left: 4px solid var(--color-neutral); }
+	.leftedge-auditor { border-left: 4px solid #22c55e; } /* green-500 for auditor */
+
+	/* =============================================================================
+	   Header
+	   ============================================================================= */
+	.head {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		padding: 0.42rem 0.6rem;
+		background: var(--color-surface);
+		border-bottom: 1px solid var(--color-border-light);
+		cursor: pointer;
+	}
+	.head:focus-visible {
+		outline: 2px solid var(--color-accent);
+		outline-offset: 2px;
+	}
+
+	.badges {
+		display: flex;
+		align-items: center;
+		gap: 0.4rem;
+	}
+	.badge {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.25rem;
+		border: 1px solid var(--color-border);
+		border-radius: 999px;
+		padding: 0 0.35rem;
+		font-size: 0.7rem;
+		line-height: 1.35;
+	}
+	.badge.type,
+	.badge.idx {
+		font-family: var(--font-mono);
+	}
+	.badge.name {
+		color: #fff;
+		border-color: transparent;
+	}
+	.badge.name.primary { background: var(--color-primary); }
+	.badge.name.secondary { background: var(--color-secondary); }
+	.badge.name.accent { background: var(--color-accent); }
+	.badge.name.info { background: var(--color-info); }
+	.badge.name.success { background: var(--color-success); }
+	.badge.name.warning { background: var(--color-warning); }
+
+	.actions {
+		position: relative;
+		display: flex;
+		align-items: center;
+		gap: 0.25rem;
+	}
+	.chev {
+		width: 16px;
+		height: 16px;
+		transition: transform 0.2s ease;
+	}
+	.chev.rot { transform: rotate(-180deg); }
+
+	/* =============================================================================
+	   Menu
+	   ============================================================================= */
+	.menu-btn {
+		width: 28px;
+		height: 28px;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		background: var(--color-bg-alt);
+		border: 1px solid var(--color-border);
+		border-radius: 6px;
+		color: var(--color-text-muted);
+		cursor: pointer;
+		transition: all var(--transition-fast);
+	}
+	.menu-btn:hover {
+		background: var(--color-surface);
+		border-color: var(--color-text-muted);
+		color: var(--color-text);
+	}
+
+	.menu-pop {
+		/* Position set via inline style for fixed positioning */
+		z-index: 9999;
+		background: var(--color-surface);
+		border: 1px solid var(--color-border);
+		border-radius: 8px;
+		box-shadow: var(--shadow-lg);
+		padding: 0.3rem;
+		display: flex;
+		flex-direction: column;
+		gap: 0.12rem;
+		min-width: 260px;
+	}
+	.menu-item {
+		display: flex;
+		align-items: center;
+		gap: 0.4rem;
+		background: transparent;
+		border: 0;
+		text-align: left;
+		padding: 0.36rem 0.5rem;
+		border-radius: 6px;
+		font-size: 0.82rem;
+		color: var(--color-text);
+		cursor: pointer;
+	}
+	.menu-item:hover { background: var(--color-bg-alt); }
+
+	/* Submenu styles */
+	.menu-item-with-submenu {
+		position: relative;
+		width: 100%;
+	}
+	.menu-item-with-submenu:hover > .menu-item.has-submenu {
+		background: var(--color-bg-alt);
+	}
+	.menu-item.has-submenu {
+		justify-content: flex-start;
+		width: 100%;
+	}
+	.menu-item.has-submenu span {
+		flex: 1;
+	}
+	:global(.submenu-arrow) {
+		color: var(--color-text-muted);
+		margin-left: auto;
+	}
+	.copy-submenu {
+		position: absolute;
+		left: 100%;
+		top: -0.3rem;
+		margin-left: 4px;
+		background: var(--color-surface);
+		border: 1px solid var(--color-border);
+		border-radius: 8px;
+		box-shadow: var(--shadow-lg);
+		padding: 0.3rem;
+		display: flex;
+		flex-direction: column;
+		gap: 0.12rem;
+		min-width: 200px;
+		z-index: 10000;
+	}
+
+	.menu-divider {
+		height: 1px;
+		background: var(--color-border-light);
+		margin: 0.2rem 0;
+	}
+	.mi {
+		width: 14px;
+		height: 14px;
+		color: var(--color-text-muted);
+	}
+	:global(.highlight-star) {
+		color: var(--color-highlight) !important;
+	}
+
+	/* =============================================================================
+	   Body
+	   ============================================================================= */
+	.body {
+		padding: 0.45rem 0.6rem 0.6rem;
+		display: grid;
+		gap: 0.35rem;
+	}
+
+	.pre {
+		background: transparent;
+		padding: 0.35rem 0.45rem;
+		border: 0;
+		border-radius: 6px;
+		white-space: pre-wrap;
+		overflow-wrap: anywhere;
+		word-break: break-word;
+		font-family: var(--font-mono);
+		font-size: 0.78rem;
+		margin: 0.1rem 0;
+	}
+
+	/* =============================================================================
+	   Prose (shared markdown styles for .text, .prose, .reasoning-content)
+	   ============================================================================= */
+	.text,
+	:global(.prose) {
+		white-space: normal;
+		overflow-wrap: anywhere;
+		word-break: break-word;
+		font-size: 0.9rem !important;
+		line-height: 1.4;
+		color: var(--color-text);
+		margin: 0;
+	}
+	.text-pre-wrap { white-space: pre-wrap; }
+
+	:global(.text *),
+	:global(.prose *) {
+		font-size: 0.9rem !important;
+	}
+	:global(.text p),
+	:global(.prose p) {
+		margin: 0 0 0.5em 0;
+		font-size: 0.9rem !important;
+	}
+	:global(.text p:last-child),
+	:global(.prose p:last-child) {
+		margin-bottom: 0;
+	}
+	:global(.text > *:first-child),
+	:global(.prose > *:first-child) {
+		margin-top: 0;
+	}
+	:global(.text h1),
+	:global(.prose h1) { font-size: 1.18em !important; font-weight: 600; margin: 0.3rem 0; line-height: 1.35; }
+	:global(.text h2),
+	:global(.prose h2) { font-size: 1.12em; font-weight: 600; margin: 0.3rem 0; line-height: 1.35; }
+	:global(.text h3),
+	:global(.prose h3) { font-size: 1.06em; font-weight: 600; margin: 0.28rem 0; line-height: 1.35; }
+	:global(.text h4),
+	:global(.prose h4) { font-size: 1em; font-weight: 600; margin: 0.26rem 0; line-height: 1.35; }
+	:global(.text h5),
+	:global(.prose h5) { font-size: 0.95em; font-weight: 600; margin: 0.24rem 0; line-height: 1.35; }
+	:global(.text h6),
+	:global(.prose h6) { font-size: 0.9em; font-weight: 600; margin: 0.22rem 0; line-height: 1.35; }
+	:global(.text h1:first-child),
+	:global(.text h2:first-child),
+	:global(.text h3:first-child),
+	:global(.text h4:first-child),
+	:global(.text h5:first-child),
+	:global(.text h6:first-child),
+	:global(.prose h1:first-child),
+	:global(.prose h2:first-child),
+	:global(.prose h3:first-child),
+	:global(.prose h4:first-child),
+	:global(.prose h5:first-child),
+	:global(.prose h6:first-child) {
+		margin-top: 0;
+	}
+	:global(.text ul),
+	:global(.text ol),
+	:global(.prose ul),
+	:global(.prose ol) {
+		margin: 0.5em 0;
+		padding-left: 1.5em;
+	}
+	:global(.text li),
+	:global(.prose li) {
+		margin: 0.2em 0;
+	}
+	:global(.text blockquote),
+	:global(.prose blockquote) {
+		margin: 0.5em 0;
+		padding: 0.5em 1em;
+		border-left: 4px solid var(--color-border);
+		background: var(--color-bg);
+		color: var(--color-text-muted);
+		font-style: italic;
+	}
+	:global(.text code),
+	:global(.prose code) {
+		background: var(--color-bg-alt);
+		padding: 0.1em 0.3em;
+		border-radius: 3px;
+		font-size: 0.9em;
+		font-family: var(--font-mono);
+	}
+	:global(.text pre),
+	:global(.prose pre) {
+		background: var(--color-bg);
+		border: 1px solid var(--color-border);
+		border-radius: 6px;
+		padding: 1em;
+		overflow-x: auto;
+		margin: 0.5em 0;
+		white-space: pre-wrap;
+		overflow-wrap: anywhere;
+		word-break: break-word;
+	}
+	:global(.text pre code),
+	:global(.prose pre code) {
+		background: transparent;
+		padding: 0;
+		border-radius: 0;
+		white-space: inherit;
+		overflow-wrap: inherit;
+		word-break: inherit;
+	}
+	:global(.text a),
+	:global(.prose a) {
+		color: var(--color-accent, #2563eb);
+		text-decoration: none;
+	}
+	:global(.text a:hover),
+	:global(.prose a:hover) {
+		text-decoration: underline;
+	}
+	:global(.text strong),
+	:global(.prose strong) {
+		font-weight: 600;
+	}
+	:global(.text em),
+	:global(.prose em) {
+		font-style: italic;
+	}
+	:global(.text table),
+	:global(.prose table) {
+		font-size: 0.9rem;
+		border-collapse: collapse;
+	}
+	:global(.text th),
+	:global(.text td),
+	:global(.prose th),
+	:global(.prose td) {
+		border: 1px solid var(--color-border);
+		padding: 0.25rem 0.4rem;
+	}
+
+	/* =============================================================================
+	   Reasoning Block
+	   ============================================================================= */
+	.reasoning {
+		margin: 0.35rem 0;
+		background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%);
+		border: 1px solid #e2e8f0;
+		border-left: 3px solid #94a3b8;
+		border-radius: 6px;
+		padding: 0.5rem 0.65rem;
+	}
+	.reasoning-summary {
+		border-left-color: var(--color-secondary);
+		background: linear-gradient(135deg, #faf5ff 0%, #f5f3ff 100%);
+		border-color: #e9d5ff;
+	}
+	.reasoning-redacted {
+		padding: 0.4rem 0.65rem;
+	}
+
+	.reasoning-header {
+		display: flex;
+		align-items: center;
+		gap: 0.4rem;
+		margin-bottom: 0.35rem;
+	}
+	.reasoning-redacted .reasoning-header {
+		margin-bottom: 0;
+	}
+
+	.reasoning-badge {
+		display: inline-block;
+		background: #64748b;
+		color: #fff;
+		border-radius: 999px;
+		padding: 0 0.4rem;
+		font-size: 0.62rem;
+		font-weight: 600;
+		letter-spacing: 0.02em;
+	}
+	.reasoning-badge.summary { background: var(--color-secondary); }
+	.reasoning-badge.redacted { background: #94a3b8; }
+
+	.reasoning-content {
+		font-style: italic;
+		color: #475569;
+	}
+	.reasoning-content :global(p) { color: #475569; }
+	.reasoning-content :global(h1),
+	.reasoning-content :global(h2),
+	.reasoning-content :global(h3),
+	.reasoning-content :global(h4),
+	.reasoning-content :global(h5),
+	.reasoning-content :global(h6),
+	.reasoning-content :global(strong) {
+		color: #334155;
+	}
+	.reasoning-content :global(code) {
+		background: rgba(255, 255, 255, 0.6);
+		color: #475569;
+	}
+	.reasoning-content :global(pre) {
+		background: rgba(255, 255, 255, 0.6);
+		border-color: #e2e8f0;
+	}
+	.reasoning-content :global(a) {
+		color: #6366f1;
+	}
+	.reasoning-content :global(ul),
+	.reasoning-content :global(ol) {
+		color: #475569;
+	}
+
+	/* =============================================================================
+	   Tool Calls
+	   ============================================================================= */
+	.toolcalls { margin-top: 0.05rem; }
+	.tool-sep {
+		margin: 0.35rem 0;
+		border-top: 1px dashed rgba(0, 0, 0, 0.15);
+	}
+
+	.toolgrid {
+		display: grid;
+		grid-template-columns: 16px 1fr;
+		column-gap: 8px;
+		row-gap: 0;
+		align-items: start;
+		margin: 0;
+	}
+
+	.tc-col-toggle {
+		display: flex;
+		align-items: start;
+		justify-content: center;
+	}
+	.tc-toggle {
+		width: 16px;
+		height: 16px;
+		padding: 0;
+		margin: 2px 0 0 0;
+		border: 0;
+		background: transparent;
+		color: var(--color-text-muted);
+		cursor: pointer;
+	}
+	.tc-caret {
+		width: 12px;
+		height: 12px;
+		transition: transform 0.12s ease;
+	}
+	.tc-caret.rot-90 { transform: rotate(-90deg); }
+
+	.tc-col-stick {
+		width: 1px;
+		background: rgba(0, 0, 0, 0.12);
+		justify-self: center;
+		align-self: stretch;
+	}
+	.tc-col-content { min-width: 0; }
+	.tc-col-body { min-width: 0; }
+	.tc-col-body > :first-child { margin-top: 0 !important; }
+	.tc-col-body > :last-child { margin-bottom: 0 !important; }
+
+	.toolhdr {
+		display: flex;
+		align-items: center;
+		gap: 0.4rem;
+		font-size: 0.8rem;
+		margin-bottom: 0.12rem;
+		overflow-x: auto;
+		overflow-y: hidden;
+		white-space: nowrap;
+		scrollbar-width: none;
+		-ms-overflow-style: none;
+	}
+	.toolhdr::-webkit-scrollbar { display: none; }
+	.toolhdr > * {
+		white-space: nowrap;
+		flex: 0 0 auto;
+	}
+	.toolbadge {
+		display: inline-block;
+		background: var(--color-info);
+		color: #fff;
+		border-radius: 999px;
+		padding: 0 0.35rem;
+		font-size: 0.65rem;
+	}
+	.toolname { font-family: var(--font-mono); }
+	.toolid {
+		color: var(--color-text-muted);
+		font-size: 0.72rem;
+		margin-left: 0.25rem;
+	}
+
+	/* Ensure wrapping inside tool body */
+	:global(.tc-col-body pre) {
+		white-space: pre-wrap !important;
+		overflow-wrap: anywhere;
+		word-break: break-word;
+	}
+	:global(.tc-col-body pre code) {
+		white-space: inherit !important;
+		overflow-wrap: inherit;
+		word-break: inherit;
+	}
+
+	/* =============================================================================
+	   Error Display
+	   ============================================================================= */
+	.error-container {
+		background: var(--color-error-bg);
+		border: 1px solid var(--color-error-border);
+		border-radius: 6px;
+		padding: 0.6rem;
+		overflow-x: auto;
+		max-width: 100%;
+	}
+	.error-header {
+		display: flex;
+		align-items: center;
+		gap: 0.4rem;
+		margin-bottom: 0.4rem;
+	}
+	.error-badge {
+		display: inline-block;
+		background: #dc2626;
+		color: #fff;
+		border-radius: 999px;
+		padding: 0 0.35rem;
+		font-size: 0.65rem;
+		font-weight: 600;
+	}
+	.error-type {
+		color: #991b1b;
+		font-family: var(--font-mono);
+		font-size: 0.75rem;
+		font-weight: 500;
+	}
+	.error-message {
+		color: #7f1d1d;
+		font-size: 0.9rem;
+		line-height: 1.5;
+	}
+
+	:global(.error-text) {
+		white-space: pre-wrap;
+		color: #7f1d1d !important;
+	}
+	:global(.error-text pre) {
+		background: rgba(255, 255, 255, 0.5);
+		border: 1px solid #fecaca;
+		border-radius: 4px;
+		padding: 0.5em;
+		overflow-x: auto;
+		white-space: pre-wrap;
+		word-break: break-all;
+		max-width: 100%;
+	}
+	:global(.error-text code) {
+		white-space: pre-wrap;
+		word-break: break-all;
+	}
+	:global(.error-text *) { color: #7f1d1d !important; }
+	:global(.error-text p) { margin: 0 0 0.5em 0; }
+	:global(.error-text p:last-child) { margin-bottom: 0; }
+
+	/* =============================================================================
+	   Comments
+	   ============================================================================= */
+	.comments-section {
+		border-top: 2px solid var(--color-comment);
+		padding: 0.5rem 0.75rem;
+		background: var(--color-comment-bg);
+	}
+	.comment {
+		display: flex;
+		align-items: flex-start;
+		justify-content: space-between;
+		gap: 0.5rem;
+		padding: 0.4rem 0;
+		border-bottom: 1px solid var(--color-comment-border);
+	}
+	.comment:last-child {
+		border-bottom: none;
+	}
+	.comment-content {
+		flex: 1;
+		min-width: 0;
+	}
+	.comment-quote {
+		display: block;
+		font-size: 0.8rem;
+		font-style: italic;
+		color: var(--color-comment-hover);
+		padding: 0.25rem 0.5rem;
+		margin-bottom: 0.35rem;
+		background: var(--color-highlight-bg);
+		border-left: 2px solid var(--color-highlight);
+		border-radius: 2px;
+		max-height: 3rem;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+	.comment-text {
+		display: block;
+		font-size: 0.85rem;
+		font-weight: 600;
+		color: var(--color-comment);
+		white-space: pre-wrap;
+	}
+	.comment-meta {
+		display: block;
+		font-size: 0.7rem;
+		color: var(--color-comment);
+		margin-top: 0.2rem;
+		font-weight: 500;
+	}
+	.comment-delete {
+		flex-shrink: 0;
+		width: 20px;
+		height: 20px;
+		padding: 0;
+		border: none;
+		background: transparent;
+		color: #fb923c;
+		font-size: 1rem;
+		cursor: pointer;
+		border-radius: 3px;
+	}
+	.comment-delete:hover {
+		background: #fee2e2;
+		color: #dc2626;
+	}
+
+	.comment-form {
+		border-top: 2px solid var(--color-comment);
+		padding: 0.5rem 0.75rem;
+		background: var(--color-comment-bg);
+	}
+	.comment-form textarea {
+		width: 100%;
+		padding: 0.5rem;
+		border: 1px solid var(--color-comment-border);
+		border-radius: 4px;
+		font-size: 0.85rem;
+		font-family: inherit;
+		resize: vertical;
+		min-height: 3rem;
+		box-sizing: border-box;
+		background: var(--color-surface);
+		color: var(--color-text);
+	}
+	.comment-form textarea:focus {
+		outline: none;
+		border-color: var(--color-comment);
+		box-shadow: 0 0 0 2px rgba(212, 163, 115, 0.2);
+	}
+	.comment-form textarea:disabled {
+		background: var(--color-bg-alt);
+	}
+	.comment-form-actions {
+		display: flex;
+		justify-content: flex-end;
+		gap: 0.5rem;
+		margin-top: 0.5rem;
+	}
+	.comment-form-actions button {
+		padding: 0.35rem 0.75rem;
+		font-size: 0.8rem;
+		border-radius: 4px;
+		cursor: pointer;
+	}
+	.comment-form-actions button[type="button"] {
+		background: transparent;
+		border: 1px solid #d1d5db;
+		color: #6b7280;
+	}
+	.comment-form-actions button[type="button"]:hover {
+		background: #f3f4f6;
+	}
+	.comment-form-actions button[type="submit"] {
+		background: #f97316;
+		border: none;
+		color: white;
+		font-weight: 600;
+	}
+	.comment-form-actions button[type="submit"]:hover:not(:disabled) {
+		background: #ea580c;
+	}
+	.comment-form-actions button:disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
+	}
+
+	.form-hint {
+		font-size: 0.7rem;
+		color: #9ca3af;
+		margin-right: auto;
+		align-self: center;
+	}
+
+	/* Quoted text preview in comment form */
+	.quoted-text-preview {
+		margin-bottom: 0.5rem;
+		padding: 0.5rem;
+		background: #fef3c7;
+		border-left: 3px solid #f97316;
+		border-radius: 4px;
+	}
+	.quote-label {
+		font-size: 0.7rem;
+		font-weight: 600;
+		color: #92400e;
+		text-transform: uppercase;
+		letter-spacing: 0.03em;
+	}
+	.quote-content {
+		margin: 0.25rem 0 0 0;
+		font-size: 0.85rem;
+		font-style: italic;
+		color: #78350f;
+		line-height: 1.4;
+		max-height: 4.5rem;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+</style>
