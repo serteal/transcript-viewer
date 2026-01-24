@@ -1,68 +1,44 @@
 # Transcript Viewer
 
-A web app for viewing, analyzing, and annotating AI conversation transcripts. Built with SvelteKit.
+A web app for viewing and annotating AI conversation transcripts.
 
-## Features
-
-- View conversation transcripts with branching/rollback support
-- Add comments and highlights to specific messages
-- Filter transcripts by scores, models, tags
-- Folder-based navigation
-- Real-time file watching (auto-refreshes when transcripts change)
+![Demo](static/demo.gif)
 
 ## Quick Start
 
 ```bash
-# Clone the repo
 git clone git@github.com:aengusl/transcript-viewer.git
 cd transcript-viewer
-
-# Install dependencies
 npm install
-
-# Copy environment config
 cp .env.example .env
-
-# Edit .env to point to your transcripts folder
-# TRANSCRIPT_DIR=/path/to/your/transcripts
-
-# Start dev server
+# Set TRANSCRIPT_DIR in .env to point to your transcripts folder
 npm run dev
 ```
 
 Open http://localhost:5173
 
-## Example Transcript
+## Features
 
-An example transcript with comments is included in `outputs/`. Run the app and click on it to see how comments and highlights work.
+**Beautiful UI** — Dark mode, bold message tiles, full-width transcript view
 
-## Environment Variables
+**Keyboard shortcuts** — `Cmd+U` comment, `Cmd+I` highlight, `Cmd+J` sidebar, `Cmd+K` search
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `TRANSCRIPT_DIR` | `./outputs` | Directory containing transcript JSON files |
-| `ANTHROPIC_API_KEY` | - | Optional. Only needed for "regenerate summary" feature |
-| `CACHE_SIZE` | `50` | Max transcripts cached in memory |
-| `CACHE_WATCH` | `true` | Auto-refresh when files change |
+**Comments** — Sign in as guest or user, leave feedback on specific messages
 
-## Transcript Format
+**Slideshow view** — Highlight text, add descriptions, flick through key moments
 
-Transcripts are JSON files. See the example in `outputs/` for the expected structure. Key fields:
+**Summary regeneration** — Include comments, highlights, custom instructions. Summaries cite specific messages.
 
-- `metadata.id` - Unique identifier
-- `metadata.scenario_name` - Name of the scenario
-- `metadata.judge_output.summary` - AI-generated summary
-- `metadata.user_comments` - User annotations (added via UI)
-- `events` - The conversation messages
+**Filtering** — Search transcripts, filter by system prompt, tool calls, or messages with comments
 
-## Development
+**Branches** — View different conversation branches the auditor took before rollbacks
 
-```bash
-npm run dev      # Start dev server
-npm run build    # Production build
-npm run preview  # Preview production build
-npm run check    # Type check
-```
+## Configuration
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `TRANSCRIPT_DIR` | Yes | Directory containing transcript JSON files |
+| `ANTHROPIC_API_KEY` | No | Only needed for summary regeneration feature |
 
 ## License
 
