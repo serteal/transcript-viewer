@@ -5,6 +5,7 @@
 
 import { watch, type FSWatcher } from 'chokidar';
 import { relative as pathRelative } from 'node:path';
+import { loadTranscript } from '../loaders/transcript-loader.js';
 import type { 
 	Transcript, 
 	TranscriptMetadata, 
@@ -277,10 +278,19 @@ export class TranscriptCache {
 		});
 
 		this.fileWatcher
-			.on('add', (path) => {
+			.on('add', async (path) => {
 				if (path.endsWith('.json')) {
 					console.log(`📂 File added: ${path}`);
-					// Optionally load on demand; for now no-op
+					try {
+						const result = await loadTranscript(path, true);
+						if (result.metadata) {
+							this.updateTranscriptMetadata(result.metadata);
+						} else if (result.error) {
+							console.warn(`⚠️ Failed to load new transcript: ${result.error.error}`);
+						}
+					} catch (err) {
+						console.error(`❌ Error loading new transcript ${path}:`, err);
+					}
 				}
 			})
 			.on('change', (path) => {
