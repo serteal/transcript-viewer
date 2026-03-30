@@ -19,9 +19,10 @@ import CommandPalette from '$lib/client/components/CommandPalette.svelte';
 import FilterDropdown from '$lib/client/components/FilterDropdown.svelte';
 	import { collectViews, computeConversationColumns } from '$lib/client/utils/branching';
 	import { buildCitationLookup } from '$lib/client/utils/citation-utils';
+	import { collectToolFunctions } from '$lib/client/utils/tool-pairing';
 	import { onMount, setContext, tick } from 'svelte';
 	import markdownit from 'markdown-it';
-	import { Settings, User, Plus, MessageSquare, Filter, Star, PanelRight, Search, Play, Command, Tag, RefreshCw, Copy, Check } from 'lucide-svelte';
+	import { Settings, User, Plus, MessageSquare, Filter as FilterIcon, Star, PanelRight, Search, Play, Command, Tag, RefreshCw, Copy, Check } from 'lucide-svelte';
 	import { getOrCreateGuestName, formatGuestName, isGuestName, extractGuestName } from '$lib/client/utils/guest-names';
 	import { persistedState, urlParam } from '$lib/client/stores';
 	import { page } from '$app/state';
@@ -154,6 +155,7 @@ import FilterDropdown from '$lib/client/components/FilterDropdown.svelte';
 		showSharedHistory: true,
 		renderMarkdown: true,
 		fullWidth: true,
+		compactToolCalls: false,
 		// Collapsible sections state
 		summaryOpen: true,
 		descriptionOpen: false
@@ -440,10 +442,22 @@ import FilterDropdown from '$lib/client/components/FilterDropdown.svelte';
 	let showCommandPalette = $state(false);
 
 	// Filter state
-	type FilterType = 'role' | 'has' | 'search';
-	type Filter = { type: FilterType; value: string };
+	type Filter = { type: string; value: string };
 	let activeFilters = $state<Filter[]>([]);
 	let filterDropdownOpen = $state(false);
+
+	// Available tool types from all columns (for filter dropdown)
+	const availableToolTypes = $derived.by(() => {
+		const allMessages = columns.flatMap(col => col.messages);
+		return collectToolFunctions(allMessages);
+	});
+
+	// Tool type filter (derived from active filters)
+	const toolTypeFilter = $derived.by(() => {
+		const toolFilters = activeFilters.filter(f => f.type === 'tool');
+		if (toolFilters.length === 0) return undefined;
+		return new Set(toolFilters.map(f => f.value));
+	});
 
 	// Set search context for child components to access (for inline highlighting)
 	setContext('search', {
@@ -487,7 +501,7 @@ import FilterDropdown from '$lib/client/components/FilterDropdown.svelte';
 	}
 
 	// Filter toggle handler
-	function toggleFilter(type: FilterType, value: string) {
+	function toggleFilter(type: string, value: string) {
 		const existingIndex = activeFilters.findIndex(f => f.type === type && f.value === value);
 		if (existingIndex >= 0) {
 			activeFilters = activeFilters.filter((_, i) => i !== existingIndex);
@@ -497,7 +511,7 @@ import FilterDropdown from '$lib/client/components/FilterDropdown.svelte';
 	}
 
 	// Remove a specific filter
-	function removeFilter(type: FilterType, value: string) {
+	function removeFilter(type: string, value: string) {
 		activeFilters = activeFilters.filter(f => !(f.type === type && f.value === value));
 	}
 
@@ -1097,7 +1111,7 @@ import FilterDropdown from '$lib/client/components/FilterDropdown.svelte';
                         aria-label="Filter messages"
                         onclick={() => { filterDropdownOpen = !filterDropdownOpen; }}
                     >
-                        <Filter size={16} strokeWidth={1.5} />
+                        <FilterIcon size={16} strokeWidth={1.5} />
                         {#if activeFilters.length > 0}
                             <span class="filter-badge">{activeFilters.length}</span>
                         {/if}
@@ -1114,6 +1128,7 @@ import FilterDropdown from '$lib/client/components/FilterDropdown.svelte';
                                 activeFilters={activeFilters.filter(f => f.type !== 'search')}
                                 onToggleFilter={toggleFilter}
                                 onClearAll={clearAllFilters}
+                                {availableToolTypes}
                             />
                         {/snippet}
                     </Dropdown>
@@ -1245,6 +1260,10 @@ import FilterDropdown from '$lib/client/components/FilterDropdown.svelte';
                                     <input id="toggleMarkdown" type="checkbox" bind:checked={settings.value.renderMarkdown} />
                                     <label for="toggleMarkdown">Render Markdown</label>
                                 </div>
+                                <div class="settings-item">
+                                    <input id="toggleCompact" type="checkbox" bind:checked={settings.value.compactToolCalls} />
+                                    <label for="toggleCompact">Compact Tool Calls</label>
+                                </div>
                             </div>
                         {/snippet}
                     </Dropdown>
@@ -1268,6 +1287,8 @@ import FilterDropdown from '$lib/client/components/FilterDropdown.svelte';
                                 role: {filter.value}
                             {:else if filter.type === 'has'}
                                 has: {filter.value}
+                            {:else if filter.type === 'tool'}
+                                tool: {filter.value}
                             {/if}
                             <span class="chip-x">×</span>
                         </button>
@@ -1408,7 +1429,7 @@ import FilterDropdown from '$lib/client/components/FilterDropdown.svelte';
 			<pre class="raw-data">{JSON.stringify(transcript, null, 2)}</pre>
 		{:else}
 			<section class="viewer-section">
-				<SingleColumnLayout bind:this={singleColumnLayoutRef} columns={columns} transcriptEvents={transcript.events} showShared={settings.value.showSharedHistory} renderMarkdown={settings.value.renderMarkdown} fullWidth={settings.value.fullWidth} filePath={absolutePath} transcriptId={meta.transcript_id} on:ready={stopColumnsLoading} comments={userComments} highlights={userHighlights} onAddComment={handleAddComment} onDeleteComment={handleDeleteComment} onAddHighlight={handleAddHighlight} onOpenCommentModal={openCommentModal} messageFilter={activeFilters.length > 0 ? messageMatchesFilters : undefined} />
+				<SingleColumnLayout bind:this={singleColumnLayoutRef} columns={columns} transcriptEvents={transcript.events} showShared={settings.value.showSharedHistory} renderMarkdown={settings.value.renderMarkdown} fullWidth={settings.value.fullWidth} filePath={absolutePath} transcriptId={meta.transcript_id} on:ready={stopColumnsLoading} comments={userComments} highlights={userHighlights} onAddComment={handleAddComment} onDeleteComment={handleDeleteComment} onAddHighlight={handleAddHighlight} onOpenCommentModal={openCommentModal} messageFilter={activeFilters.length > 0 ? messageMatchesFilters : undefined} isCompact={settings.value.compactToolCalls} {toolTypeFilter} auditorModel={meta.auditor_model} targetModel={meta.target_model} />
 				{#if showColumnsSpinner}
 					<div class="columns-overlay" aria-live="polite" aria-busy={columnsLoading}>
 						<div class="spinner"></div>

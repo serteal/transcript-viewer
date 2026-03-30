@@ -1,0 +1,24 @@
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    environment:
+      - TRANSCRIPT_DIR=/data/transcripts
+      - AUTH_PASSWORD=${AUTH_PASSWORD:?Set AUTH_PASSWORD in .env.production}
+      - NODE_ENV=production
+      - ORIGIN=${ORIGIN:-http://localhost}
+    volumes:
+      - ${TRANSCRIPT_HOST_DIR:-./outputs}:/data/transcripts:ro
+    # Not exposed directly — nginx fronts this
+    expose:
+      - "3000"
+
+  nginx:
+    image: nginx:alpine
+    restart: unless-stopped
+    ports:
+      - "${LISTEN_PORT:-8080}:80"
+    volumes:
+      - ./deploy/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - app

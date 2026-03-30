@@ -5,6 +5,7 @@
 	import { onMount, createEventDispatcher, tick } from 'svelte';
 	import { handleCopyAction, type CopyAction } from '$lib/client/utils/copy-utils';
 	import { findCommonPrefixLength } from '$lib/client/utils/branching';
+	import { buildToolResultMap, getConsumedToolMessageIds, isConsumedMessage } from '$lib/client/utils/tool-pairing';
 
 	let {
 		columns,
@@ -20,7 +21,11 @@
 		onDeleteComment,
 		onAddHighlight,
 		onOpenCommentModal,
-		messageFilter
+		messageFilter,
+		isCompact = false,
+		toolTypeFilter,
+		auditorModel,
+		targetModel,
 	}: {
 		columns: ConversationColumn[];
 		transcriptEvents?: Event[];
@@ -36,6 +41,10 @@
 		onAddHighlight?: (messageId: string, quotedText: string) => void;
 		onOpenCommentModal?: (messageId: string, quotedText: string) => void;
 		messageFilter?: (msg: any, index: number) => boolean;
+		isCompact?: boolean;
+		toolTypeFilter?: Set<string>;
+		auditorModel?: string;
+		targetModel?: string;
 	} = $props();
 
 	// Dispatch "ready" when content is rendered
@@ -111,6 +120,25 @@
 		};
 	});
 
+	// Build tool result map and consumed IDs from ALL visible messages
+	const allVisibleMessages = $derived.by(() => {
+		const msgs: MessageWithMetadata[] = [];
+		// Shared messages
+		msgs.push(...branchData.sharedMessages);
+		// Active branch messages
+		for (const bp of branchData.branchPoints) {
+			const activeBranchId = activeBranches[bp.id] || bp.branches[0]?.id;
+			const activeBranch = bp.branches.find(b => b.id === activeBranchId);
+			if (activeBranch) {
+				msgs.push(...activeBranch.messages);
+			}
+		}
+		return msgs;
+	});
+
+	const toolResultMap = $derived(buildToolResultMap(allVisibleMessages));
+	const consumedToolIds = $derived(getConsumedToolMessageIds(allVisibleMessages));
+
 	// Initialize active branches when branch data changes
 	// Default to the branch with the most messages (skip setup branches)
 	$effect(() => {
@@ -134,6 +162,27 @@
 
 	function handleBranchChange(branchPointId: string, branchId: string) {
 		activeBranches = { ...activeBranches, [branchPointId]: branchId };
+	}
+
+	// Check if a message should be hidden (consumed tool result or relay duplicate)
+	function shouldShowMessage(msg: MessageWithMetadata, index: number): boolean {
+		if (isConsumedMessage(msg, consumedToolIds, index)) return false;
+		return true;
+	}
+
+	// Check if message matches tool type filter
+	function matchesToolTypeFilter(msg: MessageWithMetadata): boolean {
+		if (!toolTypeFilter || toolTypeFilter.size === 0) return true;
+		// For assistant messages with tool calls, check if any tool matches
+		if (msg.role === 'assistant' && (msg as any).tool_calls?.length > 0) {
+			return (msg as any).tool_calls.some((tc: any) => toolTypeFilter!.has(tc.function));
+		}
+		// For tool result messages, check the function name
+		if (msg.role === 'tool' && (msg as any).function) {
+			return toolTypeFilter.has((msg as any).function);
+		}
+		// Non-tool messages always pass tool type filter
+		return true;
 	}
 
 	// Get the messages to display based on active branches
@@ -182,6 +231,16 @@
 		const indexId = `col0:msg${msgIdx}`;
 		const byIndex = highlights.filter(h => h.message_id === indexId);
 		return [...byId, ...byIndex];
+	}
+
+	// Determine actor label (AUDITOR / TARGET) for assistant messages based on model
+	function getActorLabel(msg: MessageWithMetadata): string | undefined {
+		if (msg.role !== 'assistant') return undefined;
+		const model = (msg as any).model;
+		if (!model) return undefined;
+		if (auditorModel && model === auditorModel) return 'AUDITOR';
+		if (targetModel && model === targetModel) return 'TARGET';
+		return undefined;
 	}
 
 	// Shared expand/collapse state synchronized by message key
@@ -268,7 +327,7 @@
 					activeBranchId={activeBranches[item.branchPoint.id] || item.branchPoint.branches[0]?.id || ''}
 					onBranchChange={handleBranchChange}
 				/>
-			{:else if !messageFilter || messageFilter(item.message, item.index)}
+			{:else if shouldShowMessage(item.message, item.index) && matchesToolTypeFilter(item.message) && (!messageFilter || messageFilter(item.message, item.index))}
 				<MessageCard
 					msg={item.message}
 					isVisible={showShared || !item.message.isShared}
@@ -286,6 +345,9 @@
 					{onDeleteComment}
 					{onAddHighlight}
 					{onOpenCommentModal}
+					{toolResultMap}
+					{isCompact}
+					actorLabel={getActorLabel(item.message)}
 				/>
 			{/if}
 		{/each}

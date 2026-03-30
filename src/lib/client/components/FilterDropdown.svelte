@@ -1,17 +1,18 @@
 <script lang="ts">
 	import { X } from 'lucide-svelte';
 
-	type FilterType = 'role' | 'has';
-	type Filter = { type: FilterType; value: string };
+	type Filter = { type: string; value: string };
 
 	let {
 		activeFilters = [],
 		onToggleFilter,
-		onClearAll
+		onClearAll,
+		availableToolTypes = [],
 	}: {
 		activeFilters: Filter[];
-		onToggleFilter: (type: FilterType, value: string) => void;
+		onToggleFilter: (type: string, value: string) => void;
 		onClearAll: () => void;
+		availableToolTypes?: string[];
 	} = $props();
 
 	const roleOptions = ['system', 'user', 'assistant', 'tool'];
@@ -22,11 +23,11 @@
 		{ value: 'tool_calls', label: 'Tool Calls' }
 	];
 
-	function isActive(type: FilterType, value: string): boolean {
+	function isActive(type: string, value: string): boolean {
 		return activeFilters.some(f => f.type === type && f.value === value);
 	}
 
-	function handleToggle(type: FilterType, value: string) {
+	function handleToggle(type: string, value: string) {
 		onToggleFilter(type, value);
 	}
 </script>
@@ -65,6 +66,24 @@
 			{/each}
 		</div>
 	</div>
+
+	{#if availableToolTypes.length > 0}
+		<div class="filter-section">
+			<div class="section-label">Tool Type</div>
+			<div class="filter-chips">
+				{#each availableToolTypes as toolType}
+					<button
+						type="button"
+						class="filter-chip tool-chip"
+						class:active={isActive('tool', toolType)}
+						onclick={() => handleToggle('tool', toolType)}
+					>
+						{toolType}
+					</button>
+				{/each}
+			</div>
+		</div>
+	{/if}
 
 	{#if activeFilters.length > 0}
 		<div class="dropdown-footer">
@@ -131,6 +150,11 @@
 		background: var(--color-accent);
 		border-color: var(--color-accent);
 		color: white;
+	}
+
+	.filter-chip.tool-chip {
+		font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+		font-size: 0.7rem;
 	}
 
 	.dropdown-footer {

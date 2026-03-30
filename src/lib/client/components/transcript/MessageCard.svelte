@@ -10,9 +10,11 @@
 		UserComment,
 		UserHighlight
 	} from '$lib/shared/types';
+	import type { PairedToolResult } from '$lib/client/utils/tool-pairing';
 	import { Eye, Clipboard, FileText, Database, Wrench, Link, MessageSquare, Star, ChevronRight } from 'lucide-svelte';
 	import HighlightedText from '$lib/client/components/citations/HighlightedText.svelte';
 	import HighlightedMarkdown from '$lib/client/components/citations/HighlightedMarkdown.svelte';
+	import ToolCallRenderer from '$lib/client/components/transcript/ToolCallRenderer.svelte';
 	import SelectionPopup from '$lib/client/components/transcript/SelectionPopup.svelte';
 	import type { CopyAction } from '$lib/client/utils/copy-utils';
 
@@ -36,7 +38,10 @@
 		onAddComment,
 		onDeleteComment,
 		onAddHighlight,
-		onOpenCommentModal
+		onOpenCommentModal,
+		toolResultMap,
+		isCompact = false,
+		actorLabel,
 	}: {
 		msg: MessageWithMetadata;
 		isOpen?: boolean;
@@ -54,6 +59,9 @@
 		onDeleteComment?: (commentId: string) => Promise<void>;
 		onAddHighlight?: (messageId: string, quotedText: string) => void;
 		onOpenCommentModal?: (messageId: string, quotedText: string) => void;
+		toolResultMap?: Map<string, PairedToolResult>;
+		isCompact?: boolean;
+		actorLabel?: string;
 	} = $props();
 
 	const expanded = $derived(isOpen);
@@ -63,7 +71,6 @@
 	let menuBtnRef: HTMLButtonElement | null = $state(null);
 	let menuRef: HTMLDivElement | null = $state(null);
 	let menuPosition = $state<{ top: number; right: number } | null>(null);
-	let collapsedToolCallById: Record<string, boolean> = $state({});
 	let showCommentForm = $state(false);
 	let commentText = $state('');
 	let submittingComment = $state(false);
@@ -93,14 +100,6 @@
 	// =============================================================================
 	// Helpers
 	// =============================================================================
-
-	function isToolCallCollapsed(id: string): boolean {
-		return !!collapsedToolCallById[id];
-	}
-
-	function toggleToolCallCollapsed(id: string) {
-		collapsedToolCallById[id] = !collapsedToolCallById[id];
-	}
 
 	function getMessageSourceLabel(message: Message): string | null {
 		const meta = message.metadata;
@@ -133,6 +132,10 @@
 	const sourceLabel = $derived(getMessageSourceLabel(msg));
 	const sourceColor = $derived(hashStringToColor(sourceLabel || ''));
 
+	// Parallel tool calls detection
+	const toolCallCount = $derived(getAssistantToolCalls(msg).length);
+	const hasParallelToolCalls = $derived(toolCallCount > 1);
+
 	function renderContent(c: Content): string {
 		if (c.type === 'text') return c.text;
 		if (c.type === 'tool_use')
@@ -164,78 +167,6 @@
 			return { text: '', state: 'redacted', label: 'THINKING REDACTED' };
 		}
 		return { text: c.reasoning, state: 'full', label: 'THINKING' };
-	}
-
-	// Minimal YAML-like serializer for readable tool args/results
-	function toYaml(value: unknown, indent: number = 0): string {
-		const pad = (n: number) => '  '.repeat(n);
-		const isPlainObject = (v: unknown) => Object.prototype.toString.call(v) === '[object Object]';
-
-		if (value === null || value === undefined) return 'null';
-
-		if (typeof value === 'string') {
-			let unescaped: string;
-			try {
-				unescaped = JSON.parse('"' + value.replace(/"/g, '\\"') + '"');
-			} catch {
-				unescaped = value;
-			}
-			if (unescaped.includes('\n')) {
-				return unescaped
-					.split('\n')
-					.map((l) => pad(indent + 1) + l)
-					.join('\n');
-			}
-			const needsQuotes =
-				/^[\s]*$|^[>|]|[:#\[\]{}*&!%@`]/.test(unescaped) ||
-				unescaped.startsWith('-') ||
-				/^\d/.test(unescaped) ||
-				['true', 'false', 'null', 'yes', 'no', 'on', 'off'].includes(unescaped.toLowerCase());
-			return needsQuotes ? JSON.stringify(unescaped) : unescaped;
-		}
-
-		if (typeof value === 'number' || typeof value === 'boolean') return String(value);
-
-		if (Array.isArray(value)) {
-			if (value.length === 0) return '[]';
-			return value
-				.map((item) => {
-					const rendered = toYaml(item, indent + 1);
-					if (rendered.includes('\n')) {
-						const lines = rendered
-							.split('\n')
-							.map((l) => pad(indent + 1) + l)
-							.join('\n');
-						return `${pad(indent)}-\n${lines}`;
-					}
-					return `${pad(indent)}- ${rendered}`;
-				})
-				.join('\n');
-		}
-
-		if (isPlainObject(value)) {
-			const entries = Object.entries(value as Record<string, unknown>);
-			if (entries.length === 0) return '{}';
-			return entries
-				.map(([k, v]) => {
-					const rendered = toYaml(v, indent + 1);
-					if (rendered.includes('\n')) {
-						const lines = rendered
-							.split('\n')
-							.map((l) => pad(indent + 1) + l)
-							.join('\n');
-						return `${pad(indent)}${k}:\n${lines}`;
-					}
-					return `${pad(indent)}${k}: ${rendered}`;
-				})
-				.join('\n');
-		}
-
-		try {
-			return JSON.stringify(value, null, 2);
-		} catch {
-			return String(value);
-		}
 	}
 
 	// Menu action helper
@@ -366,8 +297,9 @@
 </script>
 
 <article
-	class="card {msg.role === 'assistant' ? (sourceLabel?.toLowerCase() === 'auditor' ? 'bordercol-auditor leftedge-auditor' : `leftedge-${sourceColor} bordercol-${sourceColor}`) : ''} {msg.isShared ? 'shared' : ''} {isVisible ? '' : 'invisible pointer-events-none'}"
+	class="card {msg.role === 'assistant' ? (sourceLabel?.toLowerCase() === 'auditor' ? 'bordercol-auditor leftedge-auditor' : `leftedge-${sourceColor} bordercol-${sourceColor}`) : ''} {actorLabel ? `actor-card-${actorLabel.toLowerCase()}` : ''} {msg.isShared ? 'shared' : ''} {isVisible ? '' : 'invisible pointer-events-none'}"
 	data-role={msg.role}
+	data-actor={actorLabel?.toLowerCase() || undefined}
 	data-shared={msg.isShared ? '1' : undefined}
 	data-message-id={msg.id}
 	data-message-index={messageIndex}
@@ -385,8 +317,14 @@
 			{#if msg.messageIndex !== undefined}
 				<span class="badge idx">Message {msg.messageIndex + 1}</span>
 			{/if}
+			{#if actorLabel}
+				<span class={`badge actor actor-${actorLabel.toLowerCase()}`}>{actorLabel}</span>
+			{/if}
 			{#if sourceLabel}
 				<span class={`badge name ${sourceColor}`}>{sourceLabel.toUpperCase()}</span>
+			{/if}
+			{#if hasParallelToolCalls}
+				<span class="badge parallel">{toolCallCount} tools in parallel</span>
 			{/if}
 		</div>
 		<div class="actions">
@@ -494,7 +432,20 @@
 				{@render messageContent(msg)}
 				{#if msg.role === 'assistant' && getAssistantToolCalls(msg).length > 0}
 					<div class="toolcalls">
-						{@render toolCallsContent(msg, getAssistantToolCalls(msg))}
+						{#each getAssistantToolCalls(msg) as tc, i (tc.id ?? String(i))}
+							{#if i > 0}
+								<div class="tool-sep"></div>
+							{/if}
+							<ToolCallRenderer
+								toolCall={tc}
+								result={toolResultMap?.get(tc.id)}
+								message={msg}
+								{renderMarkdown}
+								{isCompact}
+								{comments}
+								{highlights}
+							/>
+						{/each}
 					</div>
 				{/if}
 			{/if}
@@ -636,51 +587,6 @@
 	</div>
 {/snippet}
 
-<!-- Tool calls list -->
-{#snippet toolCallsContent(message: MessageWithMetadata, toolCalls: ToolCall[])}
-	{#each toolCalls as tc, i (tc.id ?? String(i))}
-		{@const tcId = tc.id ?? String(i)}
-		{#if i > 0}
-			<div class="tool-sep"></div>
-		{/if}
-		<div class="toolgrid">
-			<div class="tc-col-toggle">
-				<button
-					type="button"
-					class="tc-toggle"
-					aria-label="Toggle tool call"
-					aria-expanded={!isToolCallCollapsed(tcId)}
-					aria-controls={`toolcall-${tcId}`}
-					onclick={(e) => { e.stopPropagation(); toggleToolCallCollapsed(tcId); }}
-					onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); toggleToolCallCollapsed(tcId); } }}
-				>
-					<svg class={`tc-caret ${isToolCallCollapsed(tcId) ? 'rot-90' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
-					</svg>
-				</button>
-			</div>
-			<div class="tc-col-content">
-				<div class="toolhdr">
-					<span class="toolbadge">TOOL</span>
-					<span class="toolname">{tc.function}</span>
-					{#if tc.id}
-						<span class="toolid">ID: {tc.id}</span>
-					{/if}
-				</div>
-			</div>
-			{#if !isToolCallCollapsed(tcId)}
-				<div class="tc-col-stick" aria-hidden="true"></div>
-				<div class="tc-col-body" id={`toolcall-${tcId}`}>
-					{#if tc.view}
-						{@render renderText(message, tc.view.content, 'prose')}
-					{:else}
-						<pre class="pre">{@render renderText(message, toYaml(tc.arguments), 'pre')}</pre>
-					{/if}
-				</div>
-			{/if}
-		</div>
-	{/each}
-{/snippet}
 
 <style>
 	/* =============================================================================
@@ -779,6 +685,39 @@
 	.badge.name.info { background: var(--color-info); }
 	.badge.name.success { background: var(--color-success); }
 	.badge.name.warning { background: var(--color-warning); }
+	.badge.parallel {
+		background: #dbeafe;
+		color: #1d4ed8;
+		border-color: #93c5fd;
+		font-size: 0.65rem;
+		font-weight: 500;
+	}
+	:global(.dark) .badge.parallel {
+		background: #1e3a5f40;
+		color: #93c5fd;
+		border-color: #1e3a5f;
+	}
+	.badge.actor {
+		font-size: 0.62rem;
+		font-weight: 700;
+		letter-spacing: 0.04em;
+		border-color: transparent;
+		color: #fff;
+	}
+	.badge.actor-auditor {
+		background: #22c55e;
+	}
+	.badge.actor-target {
+		background: #3b82f6;
+	}
+
+	/* Card-level actor styling */
+	.actor-card-auditor {
+		border-left: 4px solid #22c55e;
+	}
+	.actor-card-target {
+		border-left: 4px solid #3b82f6;
+	}
 
 	.actions {
 		position: relative;
@@ -1134,91 +1073,7 @@
 		border-top: 1px dashed rgba(0, 0, 0, 0.15);
 	}
 
-	.toolgrid {
-		display: grid;
-		grid-template-columns: 16px 1fr;
-		column-gap: 8px;
-		row-gap: 0;
-		align-items: start;
-		margin: 0;
-	}
-
-	.tc-col-toggle {
-		display: flex;
-		align-items: start;
-		justify-content: center;
-	}
-	.tc-toggle {
-		width: 16px;
-		height: 16px;
-		padding: 0;
-		margin: 2px 0 0 0;
-		border: 0;
-		background: transparent;
-		color: var(--color-text-muted);
-		cursor: pointer;
-	}
-	.tc-caret {
-		width: 12px;
-		height: 12px;
-		transition: transform 0.12s ease;
-	}
-	.tc-caret.rot-90 { transform: rotate(-90deg); }
-
-	.tc-col-stick {
-		width: 1px;
-		background: rgba(0, 0, 0, 0.12);
-		justify-self: center;
-		align-self: stretch;
-	}
-	.tc-col-content { min-width: 0; }
-	.tc-col-body { min-width: 0; }
-	.tc-col-body > :first-child { margin-top: 0 !important; }
-	.tc-col-body > :last-child { margin-bottom: 0 !important; }
-
-	.toolhdr {
-		display: flex;
-		align-items: center;
-		gap: 0.4rem;
-		font-size: 0.8rem;
-		margin-bottom: 0.12rem;
-		overflow-x: auto;
-		overflow-y: hidden;
-		white-space: nowrap;
-		scrollbar-width: none;
-		-ms-overflow-style: none;
-	}
-	.toolhdr::-webkit-scrollbar { display: none; }
-	.toolhdr > * {
-		white-space: nowrap;
-		flex: 0 0 auto;
-	}
-	.toolbadge {
-		display: inline-block;
-		background: var(--color-info);
-		color: #fff;
-		border-radius: 999px;
-		padding: 0 0.35rem;
-		font-size: 0.65rem;
-	}
-	.toolname { font-family: var(--font-mono); }
-	.toolid {
-		color: var(--color-text-muted);
-		font-size: 0.72rem;
-		margin-left: 0.25rem;
-	}
-
-	/* Ensure wrapping inside tool body */
-	:global(.tc-col-body pre) {
-		white-space: pre-wrap !important;
-		overflow-wrap: anywhere;
-		word-break: break-word;
-	}
-	:global(.tc-col-body pre code) {
-		white-space: inherit !important;
-		overflow-wrap: inherit;
-		word-break: inherit;
-	}
+	/* Tool call styles now in ToolCallRenderer.svelte */
 
 	/* =============================================================================
 	   Error Display

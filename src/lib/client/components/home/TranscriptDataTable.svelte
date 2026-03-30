@@ -945,9 +945,20 @@
 				return row?.original?.type === 'folder' ? 36 : 56;
 			},
 			overscan: 10,
+			measureElement: (el) => el.getBoundingClientRect().height,
 		});
 	});
 	
+
+	// Svelte action to let the virtualizer measure each row's actual height
+	function measureRow(node: HTMLElement) {
+		$virtualizer.measureElement(node);
+		return {
+			destroy() {
+				// no-op
+			}
+		};
+	}
 
 	// Grid columns template from column sizes (px)
 	const columnWidths = $derived.by(() => table.getVisibleLeafColumns().map((c: any) => c.getSize()));
@@ -1771,6 +1782,8 @@
 				<div
 					class="row folder"
 					class:alt={virtualRow.index % 2 === 1}
+					data-index={virtualRow.index}
+					use:measureRow
 					style={`grid-template-columns:${gridTemplate}; position: absolute; top: 0; left: 0; width: 100%; transform: translateY(${virtualRow.start}px);`}
 					role="button"
 					tabindex="0"
@@ -1795,6 +1808,8 @@
 					href={`/transcript/${encodeURIComponent(r.path)}`}
 					class="row transcript"
 					class:alt={virtualRow.index % 2 === 1}
+					data-index={virtualRow.index}
+					use:measureRow
 					style={`grid-template-columns:${gridTemplate}; position: absolute; top: 0; left: 0; width: 100%; transform: translateY(${virtualRow.start}px);`}
 				>
 					{#each row.getVisibleCells() as cell (cell.column.id)}
@@ -2342,7 +2357,7 @@
 	}
 	.row { display: grid; align-items: stretch; border-bottom: 1px solid #f3f4f6; min-height: 36px; text-decoration: none; color: inherit; transition: background-color .1s ease; }
 	.row.folder { min-height: 36px; height: 36px; }
-	.row.transcript { min-height: 56px; height: 56px; }
+	.row.transcript { min-height: 56px; }
 	.row.alt { background: #fafafa; }
 	.row:hover { background: #f5f7fa; }
 	.row.folder { cursor: pointer; }
@@ -2362,7 +2377,7 @@
 	.row.transcript .td[data-colid="seed_instruction"] { align-items: flex-start; }
 	.td[data-colid="seed_instruction"] { white-space: normal; height: 100%; }
 	/* Tags: allow wrapping to multiple rows */
-	.td[data-colid="tags"] { white-space: normal; }
+	.td[data-colid="tags"] { white-space: normal; overflow: visible; }
 	
 	/* Column settings panel */
 	.column-settings-container { 
