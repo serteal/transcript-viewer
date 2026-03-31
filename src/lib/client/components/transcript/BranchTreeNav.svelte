@@ -1,95 +1,34 @@
 <script lang="ts">
-	import type { BranchTree, BranchSegment, CheckpointNode } from '$lib/client/utils/branch-tree';
-	import { GitBranch, Circle, Diamond, MessageSquare } from 'lucide-svelte';
+	import type { BranchTree, BranchLeaf } from '$lib/client/utils/branch-tree';
+	import { GitBranch, MessageSquare } from 'lucide-svelte';
 
 	let {
 		tree,
-		activeSegmentId,
-		onSegmentSelect,
+		activeBranchId,
+		onBranchSelect,
 	}: {
 		tree: BranchTree;
-		activeSegmentId: string;
-		onSegmentSelect: (segmentId: string) => void;
+		activeBranchId: string;
+		onBranchSelect: (branchId: string) => void;
 	} = $props();
 
-	// Build a display-friendly tree structure
-	interface TreeNode {
-		type: 'checkpoint' | 'segment';
-		checkpoint?: CheckpointNode;
-		segment?: BranchSegment;
-		children: TreeNode[];
-		depth: number;
-	}
-
-	const displayTree = $derived.by(() => {
-		const nodes: TreeNode[] = [];
-
-		// Shared prefix node
-		if (tree.sharedPrefix.length > 0) {
-			nodes.push({
-				type: 'segment',
-				segment: {
-					id: 'shared',
-					label: 'Setup',
-					parentCheckpoint: null,
-					startIndex: 0,
-					endIndex: tree.firstForkIndex + 1,
-					messages: tree.sharedPrefix,
-					sendMessageCount: 0,
-				},
-				children: [],
-				depth: 0,
-			});
-		}
-
-		// Find checkpoints in the shared prefix that have forks
-		const forkedCheckpoints = tree.checkpoints.filter(
-			cp => tree.forkMap.has(cp.label) && (tree.forkMap.get(cp.label)?.length ?? 0) > 0
-		);
-
-		// For each forked checkpoint, add it and its branches
-		for (const cp of forkedCheckpoints) {
-			const cpNode: TreeNode = {
-				type: 'checkpoint',
-				checkpoint: cp,
-				children: [],
-				depth: 0,
-			};
-
-			const branchIds = tree.forkMap.get(cp.label) || [];
-			for (const branchId of branchIds) {
-				const segment = tree.segments.find(s => s.id === branchId);
-				if (segment) {
-					cpNode.children.push({
-						type: 'segment',
-						segment,
-						children: [],
-						depth: 1,
-					});
-				}
-			}
-
-			nodes.push(cpNode);
-		}
-
-		return nodes;
-	});
+	const totalBranches = $derived(tree.allBranches.length);
 </script>
 
 <div class="branch-tree">
 	<div class="tree-header">
 		<GitBranch size={14} strokeWidth={2} />
 		<span class="tree-title">Audit Branches</span>
-		<span class="tree-count">{tree.segments.length}</span>
+		<span class="tree-count">{totalBranches}</span>
 	</div>
 
 	<div class="tree-body">
-		<!-- Shared prefix -->
+		<!-- Shared prefix (setup) -->
 		{#if tree.sharedPrefix.length > 0}
 			<div class="tree-row">
 				<div class="tree-graph">
 					<div class="tree-dot trunk"></div>
-					<div class="tree-line"></div>
+					<div class="tree-vline full"></div>
 				</div>
 				<div class="tree-info">
 					<span class="tree-label muted">Setup</span>
@@ -98,48 +37,59 @@
 			</div>
 		{/if}
 
-		<!-- For each forked checkpoint and its branches -->
-		{#each displayTree.filter(n => n.type === 'checkpoint') as cpNode}
-			{@const cp = cpNode.checkpoint}
-			{@const branches = cpNode.children}
+		<!-- For each checkpoint: parent node + branch leaves -->
+		{#each tree.checkpoints as cp, ci (cp.label)}
+			{@const branches = tree.branchesByCheckpoint.get(cp.label) || []}
+			{@const isLastCheckpoint = ci === tree.checkpoints.length - 1}
 
-			<!-- Checkpoint node -->
-			<div class="tree-row checkpoint-row">
+			<!-- Checkpoint parent node -->
+			<div class="tree-row">
 				<div class="tree-graph">
 					<div class="tree-dot checkpoint"></div>
 					{#if branches.length > 0}
-						<div class="tree-line"></div>
+						<div class="tree-vline full"></div>
 					{/if}
 				</div>
 				<div class="tree-info">
-					<span class="tree-label checkpoint-label">{cp?.label.replace(/-/g, ' ')}</span>
+					<span class="tree-label checkpoint-label">{cp.label.replace(/-/g, ' ')}</span>
 				</div>
 			</div>
 
-			<!-- Branch segments from this checkpoint -->
-			{#each branches as branchNode, bi}
-				{@const seg = branchNode.segment}
-				{@const isActive = seg?.id === activeSegmentId}
+			<!-- Branch leaves from this checkpoint -->
+			{#each branches as branch, bi (branch.id)}
+				{@const isActive = branch.id === activeBranchId}
 				{@const isLast = bi === branches.length - 1}
 				<button
 					type="button"
 					class="tree-row branch-row"
 					class:active={isActive}
-					onclick={() => seg && onSegmentSelect(seg.id)}
+					onclick={() => onBranchSelect(branch.id)}
 				>
 					<div class="tree-graph branched">
-						<div class="tree-fork-line" class:last={isLast}></div>
-						<div class="tree-fork-horizontal"></div>
-						<div class="tree-dot branch" class:active={isActive}></div>
+						<!-- Vertical line through the fork -->
+						{#if !isLast}
+							<div class="tree-vline full"></div>
+						{:else}
+							<div class="tree-vline half"></div>
+						{/if}
+						<!-- Horizontal fork line -->
+						<div class="tree-hline"></div>
+						<!-- Branch dot -->
+						<div class="tree-dot branch" class:active={isActive} class:baseline={branch.isBaseline}></div>
 					</div>
 					<div class="tree-info">
-						<span class="tree-label" class:active={isActive}>{seg?.label}</span>
+						<span class="tree-label" class:active={isActive}>
+							{branch.label}
+							{#if branch.isBaseline}
+								<span class="tree-baseline-tag">baseline</span>
+							{/if}
+						</span>
 						<span class="tree-meta">
-							{seg?.messages.length} msgs
-							{#if seg && seg.sendMessageCount > 0}
+							{branch.messages.length} msgs
+							{#if branch.sendMessageCount > 0}
 								<span class="tree-sends">
 									<MessageSquare size={10} strokeWidth={2} />
-									{seg.sendMessageCount}
+									{branch.sendMessageCount}
 								</span>
 							{/if}
 						</span>
@@ -184,12 +134,13 @@
 		flex-direction: column;
 	}
 
+	/* ---- Row layout ---- */
 	.tree-row {
 		display: flex;
 		align-items: center;
 		gap: 0.5rem;
-		padding: 0.25rem 0;
 		min-height: 28px;
+		padding: 0.15rem 0;
 	}
 
 	.tree-row.branch-row {
@@ -198,7 +149,7 @@
 		background: transparent;
 		text-align: left;
 		border-radius: 4px;
-		padding: 0.25rem 0.35rem;
+		padding: 0.2rem 0.35rem;
 		width: 100%;
 		color: inherit;
 		font: inherit;
@@ -212,10 +163,11 @@
 		background: var(--color-accent-bg, #F5EDE4);
 	}
 
-	/* Graph column */
+	/* ---- Graph column (dots + lines) ---- */
 	.tree-graph {
 		position: relative;
 		width: 20px;
+		min-height: 24px;
 		display: flex;
 		align-items: center;
 		justify-content: center;
@@ -248,55 +200,56 @@
 		border: 2px solid var(--color-border);
 	}
 
+	.tree-dot.branch.baseline {
+		background: var(--color-text-muted);
+		border-color: var(--color-text-muted);
+	}
+
 	.tree-dot.branch.active {
 		background: #22c55e;
 		border-color: #22c55e;
 	}
 
-	.tree-line {
+	/* Vertical lines */
+	.tree-vline {
 		position: absolute;
 		left: 50%;
-		top: 50%;
-		bottom: -1px;
 		width: 2px;
 		background: var(--color-border);
 		transform: translateX(-50%);
 	}
 
-	/* Branched graph lines */
-	.tree-graph.branched {
-		position: relative;
+	.tree-vline.full {
+		top: 0;
+		bottom: 0;
 	}
 
-	.tree-fork-line {
-		position: absolute;
-		left: 50%;
-		top: -1px;
-		bottom: -1px;
-		width: 2px;
-		background: var(--color-border);
-		transform: translateX(-50%);
-	}
-
-	.tree-fork-line.last {
+	.tree-vline.half {
+		top: 0;
 		bottom: 50%;
 	}
 
-	.tree-fork-horizontal {
+	/* Branched graph: shift dot right, add horizontal line */
+	.tree-graph.branched {
+		justify-content: flex-end;
+		padding-right: 0;
+	}
+
+	.tree-hline {
 		position: absolute;
 		left: 50%;
+		right: 2px;
 		top: 50%;
-		width: 8px;
 		height: 2px;
 		background: var(--color-border);
 		transform: translateY(-50%);
 	}
 
 	.tree-dot.branch {
-		margin-left: 8px;
+		margin-right: -2px;
 	}
 
-	/* Info column */
+	/* ---- Info column ---- */
 	.tree-info {
 		display: flex;
 		flex-direction: column;
@@ -327,6 +280,17 @@
 		font-size: 0.72rem;
 		font-weight: 600;
 		text-transform: capitalize;
+	}
+
+	.tree-baseline-tag {
+		font-size: 0.6rem;
+		font-weight: 500;
+		color: var(--color-text-light);
+		background: var(--color-bg-alt);
+		border-radius: 3px;
+		padding: 0 0.2rem;
+		margin-left: 0.25rem;
+		vertical-align: middle;
 	}
 
 	.tree-meta {

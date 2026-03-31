@@ -721,8 +721,8 @@ import FilterDropdown from '$lib/client/components/FilterDropdown.svelte';
 		getActiveBranches: () => Record<string, string>;
 		switchToBranch: (branchPointId: string, branchId: string) => void;
 		getBranchTree: () => any | null;
-		getActiveSegmentId: () => string;
-		switchToSegment: (segmentId: string) => void;
+		getActiveTreeBranchId: () => string;
+		switchToTreeBranch: (branchId: string) => void;
 	} | null = $state(null);
 
 	// Reading progress bar state
@@ -764,14 +764,14 @@ import FilterDropdown from '$lib/client/components/FilterDropdown.svelte';
 		return singleColumnLayoutRef.getBranchTree();
 	});
 
-	const sidebarActiveSegmentId = $derived.by(() => {
+	const sidebarActiveTreeBranchId = $derived.by(() => {
 		if (!singleColumnLayoutRef) return '';
-		return singleColumnLayoutRef.getActiveSegmentId();
+		return singleColumnLayoutRef.getActiveTreeBranchId();
 	});
 
-	function handleSegmentSelect(segmentId: string) {
+	function handleTreeBranchSelect(branchId: string) {
 		if (singleColumnLayoutRef) {
-			singleColumnLayoutRef.switchToSegment(segmentId);
+			singleColumnLayoutRef.switchToTreeBranch(branchId);
 		}
 	}
 
@@ -1478,8 +1478,8 @@ import FilterDropdown from '$lib/client/components/FilterDropdown.svelte';
 			activeBranchId={activeBranchId}
 			onBranchSelect={handleSidebarBranchSelect}
 			branchTree={sidebarBranchTree}
-			activeSegmentId={sidebarActiveSegmentId}
-			onSegmentSelect={handleSegmentSelect}
+			activeSegmentId={sidebarActiveTreeBranchId}
+			onSegmentSelect={handleTreeBranchSelect}
 			onClose={() => sidebarOpen.value = { open: false }}
 			onCommentClick={scrollToComment}
 			onHighlightClick={(index) => navigateToHighlight(index)}

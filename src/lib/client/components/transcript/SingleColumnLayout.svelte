@@ -6,7 +6,7 @@
 	import { handleCopyAction, type CopyAction } from '$lib/client/utils/copy-utils';
 	import { findCommonPrefixLength } from '$lib/client/utils/branching';
 	import { buildToolResultMap, getConsumedToolMessageIds, isConsumedMessage } from '$lib/client/utils/tool-pairing';
-	import { hasBranchingPattern, parseBranchTree, getMessagesForSegment, type BranchTree } from '$lib/client/utils/branch-tree';
+	import { hasBranchingPattern, parseBranchTree, getMessagesForBranch, type BranchTree } from '$lib/client/utils/branch-tree';
 
 	let {
 		columns,
@@ -79,29 +79,30 @@
 
 	const useBranchTree = $derived(branchTree !== null && branchTree.segments.length > 1);
 
-	// Active segment for branch tree mode
-	let activeSegmentId = $state<string>('branch-main');
+	// Active branch for branch tree mode
+	let activeTreeBranchId = $state<string>('');
 
-	// Initialize to first segment when tree changes
+	// Initialize to first baseline branch when tree changes
 	$effect(() => {
-		if (branchTree && branchTree.segments.length > 0) {
-			// Default to the first (baseline/main) segment
-			if (!branchTree.segments.find(s => s.id === activeSegmentId)) {
-				activeSegmentId = branchTree.segments[0].id;
+		if (branchTree && branchTree.allBranches.length > 0) {
+			if (!branchTree.allBranches.find(b => b.id === activeTreeBranchId)) {
+				// Default to the first baseline branch
+				const firstBaseline = branchTree.allBranches.find(b => b.isBaseline);
+				activeTreeBranchId = firstBaseline?.id || branchTree.allBranches[0].id;
 			}
 		}
 	});
 
-	// Messages for the active branch tree segment
+	// Messages for the active branch tree leaf
 	const treeMessages = $derived.by(() => {
 		if (!branchTree) return [];
-		const { messages } = getMessagesForSegment(branchTree, activeSegmentId);
+		const { messages } = getMessagesForBranch(branchTree, activeTreeBranchId);
 		return messages;
 	});
 
 	const treeForkIndex = $derived.by(() => {
 		if (!branchTree) return 0;
-		const { forkIndex } = getMessagesForSegment(branchTree, activeSegmentId);
+		const { forkIndex } = getMessagesForBranch(branchTree, activeTreeBranchId);
 		return forkIndex;
 	});
 
@@ -356,14 +357,14 @@
 		return branchTree;
 	}
 
-	/** Get the active segment ID for branch tree mode */
-	export function getActiveSegmentId(): string {
-		return activeSegmentId;
+	/** Get the active branch ID for branch tree mode */
+	export function getActiveTreeBranchId(): string {
+		return activeTreeBranchId;
 	}
 
-	/** Switch to a specific segment in the branch tree */
-	export function switchToSegment(segmentId: string) {
-		activeSegmentId = segmentId;
+	/** Switch to a specific branch in the branch tree */
+	export function switchToTreeBranch(branchId: string) {
+		activeTreeBranchId = branchId;
 	}
 
 	export async function switchToBranchContainingMessage(messageId: string): Promise<boolean> {
@@ -373,10 +374,10 @@
 				await tick();
 				return true;
 			}
-			// Check each segment
-			for (const seg of branchTree.segments) {
-				if (seg.messages.some(m => (m as any).id === messageId)) {
-					activeSegmentId = seg.id;
+			// Check each branch leaf
+			for (const branch of branchTree.allBranches) {
+				if (branch.messages.some(m => (m as any).id === messageId)) {
+					activeTreeBranchId = branch.id;
 					await tick();
 					return true;
 				}
@@ -423,10 +424,10 @@
 						<div class="fork-badge">
 							<span class="fork-icon">&#9670;</span>
 							<span class="fork-label">
-								{branchTree?.segments.find(s => s.id === activeSegmentId)?.parentCheckpoint?.replace(/-/g, ' ') || 'Branch point'}
+								{branchTree?.allBranches.find(b => b.id === activeTreeBranchId)?.checkpoint.label.replace(/-/g, ' ') || 'Branch point'}
 							</span>
 							<span class="fork-viewing">
-								viewing: <strong>{branchTree?.segments.find(s => s.id === activeSegmentId)?.label || activeSegmentId}</strong>
+								viewing: <strong>{branchTree?.allBranches.find(b => b.id === activeTreeBranchId)?.label || activeTreeBranchId}</strong>
 							</span>
 						</div>
 						<div class="fork-line"></div>

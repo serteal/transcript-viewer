@@ -278,8 +278,8 @@
 					<div class="section-content">
 						<BranchTreeNav
 							tree={branchTree}
-							activeSegmentId={activeSegmentId || branchTree.segments[0]?.id || ''}
-							onSegmentSelect={(id) => onSegmentSelect?.(id)}
+							activeBranchId={activeSegmentId || branchTree.allBranches[0]?.id || ''}
+							onBranchSelect={(id) => onSegmentSelect?.(id)}
 						/>
 					</div>
 				{/if}
