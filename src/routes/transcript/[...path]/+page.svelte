@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { base } from '$app/paths';
 	import type { PageData } from './$types';
 import SingleColumnLayout from '$lib/client/components/transcript/SingleColumnLayout.svelte';
 import ColumnLayout from '$lib/client/components/transcript/ColumnLayout.svelte';
@@ -688,7 +689,7 @@ import FilterDropdown from '$lib/client/components/FilterDropdown.svelte';
 
 	// Save highlight to API
 	async function handleSaveHighlight(messageId: string, quotedText: string, description: string): Promise<void> {
-		const res = await fetch(`/api/transcripts/${filePath}/highlights`, {
+		const res = await fetch(`${base}/api/transcripts/${filePath}/highlights`, {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify({
@@ -714,7 +715,7 @@ import FilterDropdown from '$lib/client/components/FilterDropdown.svelte';
 		guestName = getOrCreateGuestName();
 
 		try {
-			const res = await fetch('/api/users');
+			const res = await fetch(`${base}/api/users`);
 			if (res.ok) {
 				const data = await res.json();
 				serverUsers = data.users || [];
@@ -770,7 +771,7 @@ import FilterDropdown from '$lib/client/components/FilterDropdown.svelte';
 		const currentUser = commenterName.value.name;
 		if (currentUser && (!comment.viewed_by || !comment.viewed_by.includes(currentUser))) {
 			try {
-				await fetch(`/api/transcripts/${filePath}/comments`, {
+				await fetch(`${base}/api/transcripts/${filePath}/comments`, {
 					method: 'PATCH',
 					headers: { 'Content-Type': 'application/json' },
 					body: JSON.stringify({
@@ -838,7 +839,7 @@ import FilterDropdown from '$lib/client/components/FilterDropdown.svelte';
 		if (newUserName.trim()) {
 			const name = newUserName.trim();
 			try {
-				const res = await fetch('/api/users', {
+				const res = await fetch(`${base}/api/users`, {
 					method: 'POST',
 					headers: { 'Content-Type': 'application/json' },
 					body: JSON.stringify({ name })
@@ -862,7 +863,7 @@ import FilterDropdown from '$lib/client/components/FilterDropdown.svelte';
 		if (!confirm(`Delete user "${name}"?`)) return;
 
 		try {
-			const res = await fetch('/api/users', {
+			const res = await fetch(`${base}/api/users`, {
 				method: 'DELETE',
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({ name })
@@ -890,7 +891,7 @@ import FilterDropdown from '$lib/client/components/FilterDropdown.svelte';
 		// Ensure user is saved to server
 		if (!serverUsers.includes(commenterName.value.name)) {
 			try {
-				const userRes = await fetch('/api/users', {
+				const userRes = await fetch(`${base}/api/users`, {
 					method: 'POST',
 					headers: { 'Content-Type': 'application/json' },
 					body: JSON.stringify({ name: commenterName.value.name })
@@ -904,7 +905,7 @@ import FilterDropdown from '$lib/client/components/FilterDropdown.svelte';
 			}
 		}
 
-		const res = await fetch(`/api/transcripts/${filePath}/comments`, {
+		const res = await fetch(`${base}/api/transcripts/${filePath}/comments`, {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify({
@@ -926,7 +927,7 @@ import FilterDropdown from '$lib/client/components/FilterDropdown.svelte';
 	}
 
 	async function handleDeleteComment(commentId: string): Promise<void> {
-		const res = await fetch(`/api/transcripts/${filePath}/comments`, {
+		const res = await fetch(`${base}/api/transcripts/${filePath}/comments`, {
 			method: 'DELETE',
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify({ comment_id: commentId })
@@ -942,7 +943,7 @@ import FilterDropdown from '$lib/client/components/FilterDropdown.svelte';
 	}
 
 	async function handleDeleteHighlight(highlightId: string): Promise<void> {
-		const res = await fetch(`/api/transcripts/${filePath}/highlights`, {
+		const res = await fetch(`${base}/api/transcripts/${filePath}/highlights`, {
 			method: 'DELETE',
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify({ highlight_id: highlightId })
@@ -965,7 +966,7 @@ import FilterDropdown from '$lib/client/components/FilterDropdown.svelte';
 
 	// Handle switching summary versions
 	async function handleSummaryVersionChange(versionId: string): Promise<void> {
-		const res = await fetch(`/api/transcripts/${filePath}/regenerate-summary`, {
+		const res = await fetch(`${base}/api/transcripts/${filePath}/regenerate-summary`, {
 			method: 'PATCH',
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify({ version_id: versionId })

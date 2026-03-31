@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { base } from '$app/paths';
 	import { writable } from 'svelte/store';
 	import {
 		createTable,
@@ -944,6 +945,7 @@
 				const row = rows[index];
 				return row?.original?.type === 'folder' ? 36 : 56;
 			},
+			getItemKey: (index) => rows[index]?.id ?? index,
 			overscan: 10,
 			measureElement: (el) => el.getBoundingClientRect().height,
 		});
@@ -1805,7 +1807,7 @@
 				</div>
 			{:else}
 				<a
-					href={`/transcript/${encodeURIComponent(r.path)}`}
+					href={`${base}/transcript/${encodeURIComponent(r.path)}`}
 					class="row transcript"
 					class:alt={virtualRow.index % 2 === 1}
 					data-index={virtualRow.index}

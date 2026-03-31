@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { base } from '$app/paths';
 	import { RefreshCw, X, ChevronDown, ChevronRight } from 'lucide-svelte';
 	import { onMount } from 'svelte';
 	import type { SummaryVersion } from '$lib/shared/types';
@@ -99,7 +100,7 @@
 		error = null;
 
 		try {
-			const response = await fetch(`/api/transcripts/${encodeURIComponent(transcriptPath)}/regenerate-summary`, {
+			const response = await fetch(`${base}/api/transcripts/${encodeURIComponent(transcriptPath)}/regenerate-summary`, {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({

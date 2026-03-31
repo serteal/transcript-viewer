@@ -1,14 +1,18 @@
 services:
   app:
-    build: .
+    build:
+      context: .
+      args:
+        BASE_PATH: ${BASE_PATH:-}
     restart: unless-stopped
     environment:
       - TRANSCRIPT_DIR=/data/transcripts
-      - AUTH_PASSWORD=${AUTH_PASSWORD:?Set AUTH_PASSWORD in .env.production}
+      - USERS_FILE=/data/users.json
       - NODE_ENV=production
       - ORIGIN=${ORIGIN:-http://localhost}
     volumes:
       - ${TRANSCRIPT_HOST_DIR:-./outputs}:/data/transcripts:ro
+      - ${USERS_FILE_HOST:-./users.json}:/data/users.json:ro
     # Not exposed directly — nginx fronts this
     expose:
       - "3000"
@@ -17,7 +21,7 @@ services:
     image: nginx:alpine
     restart: unless-stopped
     ports:
-      - "${LISTEN_PORT:-8080}:80"
+      - "127.0.0.1:${LISTEN_PORT:-8080}:80"
     volumes:
       - ./deploy/nginx.conf:/etc/nginx/conf.d/default.conf:ro
     depends_on:

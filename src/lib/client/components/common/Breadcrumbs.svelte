@@ -1,11 +1,12 @@
 <script lang="ts">
+    import { base } from '$app/paths';
     let { filePath }: { filePath: string } = $props();
     const parts = $derived(filePath.split('/').filter(Boolean));
-    const trail = $derived(parts.map((p, i) => ({ label: p, href: '/?path=' + encodeURIComponent(parts.slice(0, i + 1).join('/')) })));
+    const trail = $derived(parts.map((p, i) => ({ label: p, href: `${base}/?path=` + encodeURIComponent(parts.slice(0, i + 1).join('/')) })));
 </script>
 
 <nav class="crumbs" aria-label="Breadcrumb">
-    <a class="home" href="/">Home</a>
+    <a class="home" href="{base}/">Home</a>
     {#each trail.slice(0, -1) as seg}
         <span class="sep">/</span>
         <a class="seg" href={seg.href}>{seg.label}</a>

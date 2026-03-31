@@ -1,5 +1,8 @@
 FROM node:22-slim AS build
 
+ARG BASE_PATH=""
+ENV BASE_PATH=${BASE_PATH}
+
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci

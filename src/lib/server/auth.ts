@@ -1,4 +1,5 @@
-import { randomBytes, timingSafeEqual } from 'crypto';
+import { randomBytes, scryptSync, timingSafeEqual } from 'crypto';
+import { readFileSync, watchFile } from 'fs';
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -6,9 +7,62 @@ import { randomBytes, timingSafeEqual } from 'crypto';
 
 const SESSION_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 const CLEANUP_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
+const SCRYPT_KEYLEN = 64;
 
 /** Cookie name for the session ID */
 export const SESSION_COOKIE = 'tv_session';
+
+/** Max age in seconds, for the Set-Cookie header */
+export const SESSION_MAX_AGE_SECONDS = Math.floor(SESSION_MAX_AGE_MS / 1000);
+
+// ---------------------------------------------------------------------------
+// Users file
+// ---------------------------------------------------------------------------
+
+/** Format: { "username": "salt:hash", ... } */
+let users: Record<string, string> = {};
+
+const USERS_FILE = process.env.USERS_FILE || '/data/users.json';
+
+function loadUsers(): void {
+	try {
+		const raw = readFileSync(USERS_FILE, 'utf-8');
+		users = JSON.parse(raw);
+	} catch {
+		users = {};
+	}
+}
+
+loadUsers();
+
+// Re-read users file on change (handles add/remove without restart)
+try {
+	watchFile(USERS_FILE, { interval: 2000 }, () => {
+		console.log('[auth] users file changed, reloading');
+		loadUsers();
+	});
+} catch {
+	// file may not exist yet
+}
+
+// ---------------------------------------------------------------------------
+// Password hashing
+// ---------------------------------------------------------------------------
+
+export function hashPassword(password: string): string {
+	const salt = randomBytes(16).toString('hex');
+	const hash = scryptSync(password, salt, SCRYPT_KEYLEN).toString('hex');
+	return `${salt}:${hash}`;
+}
+
+function verifyHash(password: string, stored: string): boolean {
+	const [salt, hash] = stored.split(':');
+	if (!salt || !hash) return false;
+	const inputHash = scryptSync(password, salt, SCRYPT_KEYLEN);
+	const expectedHash = Buffer.from(hash, 'hex');
+	if (inputHash.length !== expectedHash.length) return false;
+	return timingSafeEqual(inputHash, expectedHash);
+}
 
 // ---------------------------------------------------------------------------
 // Session store (in-memory — fine for single-container deployment)
@@ -16,6 +70,7 @@ export const SESSION_COOKIE = 'tv_session';
 
 interface Session {
 	id: string;
+	username: string;
 	createdAt: number;
 	expiresAt: number;
 }
@@ -35,31 +90,23 @@ setInterval(() => {
 // ---------------------------------------------------------------------------
 
 /**
- * Verify a password against AUTH_PASSWORD env var.
- * Uses constant-time comparison to prevent timing attacks.
+ * Verify a username/password pair against the users file.
  */
-export function verifyPassword(input: string): boolean {
-	const expected = process.env.AUTH_PASSWORD;
-	if (!expected) {
-		console.error('AUTH_PASSWORD environment variable is not set');
-		return false;
-	}
-
-	const inputBuf = Buffer.from(input);
-	const expectedBuf = Buffer.from(expected);
-
-	if (inputBuf.length !== expectedBuf.length) return false;
-	return timingSafeEqual(inputBuf, expectedBuf);
+export function verifyPassword(username: string, password: string): boolean {
+	const stored = users[username];
+	if (!stored) return false;
+	return verifyHash(password, stored);
 }
 
 /**
- * Create a new session and return the session ID.
+ * Create a new session for a user and return the session ID.
  */
-export function createSession(): string {
+export function createSession(username: string): string {
 	const id = randomBytes(32).toString('hex');
 	const now = Date.now();
 	sessions.set(id, {
 		id,
+		username,
 		createdAt: now,
 		expiresAt: now + SESSION_MAX_AGE_MS,
 	});
@@ -67,12 +114,17 @@ export function createSession(): string {
 }
 
 /**
- * Check if a session ID is valid (exists and not expired).
+ * Check if a session ID is valid (exists, not expired, user still exists).
  */
 export function validateSession(sessionId: string): boolean {
 	const session = sessions.get(sessionId);
 	if (!session) return false;
 	if (session.expiresAt < Date.now()) {
+		sessions.delete(sessionId);
+		return false;
+	}
+	// If user was removed from users file, invalidate session
+	if (!(session.username in users)) {
 		sessions.delete(sessionId);
 		return false;
 	}
@@ -87,11 +139,8 @@ export function deleteSession(sessionId: string): void {
 }
 
 /**
- * Check whether auth is enabled (AUTH_PASSWORD is set).
+ * Check whether auth is enabled (users file has at least one user).
  */
 export function isAuthEnabled(): boolean {
-	return !!process.env.AUTH_PASSWORD;
+	return Object.keys(users).length > 0;
 }
-
-/** Max age in seconds, for the Set-Cookie header */
-export const SESSION_MAX_AGE_SECONDS = Math.floor(SESSION_MAX_AGE_MS / 1000);

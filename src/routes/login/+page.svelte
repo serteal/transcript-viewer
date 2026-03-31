@@ -13,7 +13,7 @@
 <div class="login-page">
 	<div class="login-card">
 		<h1 class="login-title">Transcript Viewer</h1>
-		<p class="login-subtitle">Enter the shared password to continue.</p>
+		<p class="login-subtitle">Sign in to continue.</p>
 
 		<form
 			method="POST"
@@ -29,14 +29,25 @@
 				<div class="login-error">{form.error}</div>
 			{/if}
 
-			<label class="login-label" for="password">Password</label>
+			<label class="login-label" for="username">Username</label>
+			<input
+				id="username"
+				name="username"
+				type="text"
+				class="login-input"
+				autocomplete="username"
+				autofocus
+				required
+				disabled={submitting}
+			/>
+
+			<label class="login-label password-label" for="password">Password</label>
 			<input
 				id="password"
 				name="password"
 				type="password"
 				class="login-input"
 				autocomplete="current-password"
-				autofocus
 				required
 				disabled={submitting}
 			/>
@@ -97,6 +108,10 @@
 		font-weight: 600;
 		color: var(--color-text, #3D3328);
 		margin-bottom: 0.35rem;
+	}
+
+	.login-label.password-label {
+		margin-top: 0.75rem;
 	}
 
 	.login-input {
