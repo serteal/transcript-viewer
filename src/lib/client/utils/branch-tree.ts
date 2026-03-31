@@ -9,6 +9,8 @@ export interface CheckpointNode {
 	label: string;
 	/** Index in the full message list where create_checkpoint was called */
 	messageIndex: number;
+	/** Parent checkpoint label (null if top-level, i.e. in shared prefix) */
+	parentCheckpointLabel: string | null;
 }
 
 /**
@@ -97,7 +99,7 @@ export function parseBranchTree(messages: MessageWithMetadata[]): BranchTree {
 	if (restorePoints.length === 0) {
 		const checkpoints = Array.from(checkpointMap.entries())
 			.sort((a, b) => a[1] - b[1])
-			.map(([label, idx]) => ({ label, messageIndex: idx }));
+			.map(([label, idx]) => ({ label, messageIndex: idx, parentCheckpointLabel: null }));
 
 		return {
 			sharedPrefix: [...messages],
@@ -120,14 +122,36 @@ export function parseBranchTree(messages: MessageWithMetadata[]): BranchTree {
 	}
 	const sharedPrefix = messages.slice(0, firstRestoredCpIndex + 1);
 
-	// Step 4: Build checkpoint nodes (only those that get restored)
+	// Step 4: Build checkpoint nodes (only those that get restored) with parent info
+	// A checkpoint's parent is the preceding checkpoint whose baseline contains it.
+	// Since checkpoints are ordered by index, cp[i]'s parent is the latest cp[j<i]
+	// whose baseline range covers cp[i].messageIndex.
+	const restoredCheckpointsSorted = Array.from(checkpointMap.entries())
+		.filter(([label]) => restoredLabels.has(label))
+		.sort((a, b) => a[1] - b[1]);
+
 	const checkpoints: CheckpointNode[] = [];
-	for (const [label, idx] of checkpointMap) {
-		if (restoredLabels.has(label)) {
-			checkpoints.push({ label, messageIndex: idx });
+	for (let ci = 0; ci < restoredCheckpointsSorted.length; ci++) {
+		const [label, idx] = restoredCheckpointsSorted[ci];
+		// Parent is the previous checkpoint if this one is inside its baseline range
+		let parentLabel: string | null = null;
+		for (let pi = ci - 1; pi >= 0; pi--) {
+			const [pLabel, pIdx] = restoredCheckpointsSorted[pi];
+			// cp[pi]'s baseline runs from pIdx+1 until first restore after pIdx
+			let pBaselineEnd = messages.length;
+			for (const ri of sortedRestores) {
+				if (ri.index > pIdx) {
+					pBaselineEnd = ri.index;
+					break;
+				}
+			}
+			if (idx > pIdx && idx < pBaselineEnd) {
+				parentLabel = pLabel;
+				break;
+			}
 		}
+		checkpoints.push({ label, messageIndex: idx, parentCheckpointLabel: parentLabel });
 	}
-	checkpoints.sort((a, b) => a.messageIndex - b.messageIndex);
 
 	// Step 5: For each checkpoint, find its branches
 	const branchesByCheckpoint = new Map<string, BranchLeaf[]>();

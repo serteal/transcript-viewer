@@ -106,6 +106,20 @@
 		return forkIndex;
 	});
 
+	// Sibling branches at the current fork point (for inline switcher)
+	const forkSiblings = $derived.by(() => {
+		if (!branchTree) return [];
+		const activeBranch = branchTree.allBranches.find(b => b.id === activeTreeBranchId);
+		if (!activeBranch) return [];
+		return branchTree.branchesByCheckpoint.get(activeBranch.checkpoint.label) || [];
+	});
+
+	const forkCheckpointLabel = $derived.by(() => {
+		if (!branchTree) return '';
+		const activeBranch = branchTree.allBranches.find(b => b.id === activeTreeBranchId);
+		return activeBranch?.checkpoint.label.replace(/-/g, ' ') || '';
+	});
+
 	// =========================================================================
 	// Snapshot-based branching (existing approach for target view)
 	// =========================================================================
@@ -417,20 +431,41 @@
 					onBranchChange={handleBranchChange}
 				/>
 			{:else if item.type === 'message'}
-				{#if 'isForkPoint' in item && item.isForkPoint}
-					<!-- Fork point indicator for branch tree mode -->
-					<div class="fork-point-indicator">
-						<div class="fork-line"></div>
-						<div class="fork-badge">
-							<span class="fork-icon">&#9670;</span>
-							<span class="fork-label">
-								{branchTree?.allBranches.find(b => b.id === activeTreeBranchId)?.checkpoint.label.replace(/-/g, ' ') || 'Branch point'}
-							</span>
-							<span class="fork-viewing">
-								viewing: <strong>{branchTree?.allBranches.find(b => b.id === activeTreeBranchId)?.label || activeTreeBranchId}</strong>
-							</span>
+				{#if 'isForkPoint' in item && item.isForkPoint && forkSiblings.length > 0}
+					<!-- Inline branch switcher (sticky) -->
+					<div class="fork-switcher-wrapper">
+						<div class="fork-switcher">
+							<div class="fork-switcher-header">
+								<span class="fork-icon">&#9670;</span>
+								<span class="fork-label">{forkCheckpointLabel}</span>
+								<span class="fork-count">{forkSiblings.length} branches</span>
+							</div>
+							<div class="fork-tabs">
+								{#each forkSiblings as sibling (sibling.id)}
+									{@const isActive = sibling.id === activeTreeBranchId}
+									<button
+										type="button"
+										class="fork-tab"
+										class:active={isActive}
+										onclick={() => { activeTreeBranchId = sibling.id; }}
+									>
+										<span class="fork-tab-dot" class:active={isActive} class:baseline={sibling.isBaseline}></span>
+										<span class="fork-tab-name">
+											{sibling.label}
+											{#if sibling.isBaseline}
+												<span class="fork-tab-tag">baseline</span>
+											{/if}
+										</span>
+										<span class="fork-tab-meta">
+											{sibling.messages.length} msgs
+											{#if sibling.sendMessageCount > 0}
+												&middot; {sibling.sendMessageCount} sent
+											{/if}
+										</span>
+									</button>
+								{/each}
+							</div>
 						</div>
-						<div class="fork-line"></div>
 					</div>
 				{/if}
 				{#if shouldShowMessage(item.message, item.index) && matchesToolTypeFilter(item.message) && (!messageFilter || messageFilter(item.message, item.index))}
@@ -482,35 +517,32 @@
 		gap: 8px;
 	}
 
-	/* Fork point indicator (branch tree mode) */
-	.fork-point-indicator {
-		display: flex;
-		align-items: center;
-		gap: 0.5rem;
-		padding: 0.5rem 0;
+	/* ---- Inline branch switcher (sticky) ---- */
+	.fork-switcher-wrapper {
+		position: sticky;
+		top: 0;
+		z-index: 100;
 		margin: 0.25rem 0;
 	}
 
-	.fork-line {
-		flex: 1;
-		height: 2px;
-		background: linear-gradient(90deg, transparent, #8b5cf6, transparent);
+	.fork-switcher {
+		background: var(--color-surface);
+		border: 2px solid #c4b5fd;
+		border-radius: 10px;
+		padding: 0.5rem 0.65rem;
+		box-shadow: 0 2px 12px rgba(139, 92, 246, 0.08);
 	}
 
-	.fork-badge {
+	:global(.dark) .fork-switcher {
+		border-color: #6d28d9;
+		box-shadow: 0 2px 12px rgba(139, 92, 246, 0.15);
+	}
+
+	.fork-switcher-header {
 		display: flex;
 		align-items: center;
 		gap: 0.35rem;
-		padding: 0.3rem 0.75rem;
-		background: linear-gradient(135deg, #faf5ff 0%, #eef2ff 100%);
-		border: 1px solid #c4b5fd;
-		border-radius: 999px;
-		white-space: nowrap;
-	}
-
-	:global(.dark) .fork-badge {
-		background: linear-gradient(135deg, #2e1065 0%, #1e1b4b 100%);
-		border-color: #6d28d9;
+		margin-bottom: 0.4rem;
 	}
 
 	.fork-icon {
@@ -525,12 +557,91 @@
 		text-transform: capitalize;
 	}
 
-	.fork-viewing {
-		font-size: 0.7rem;
+	.fork-count {
+		font-size: 0.65rem;
 		color: #a78bfa;
+		margin-left: auto;
 	}
 
-	.fork-viewing strong {
-		color: #7c3aed;
+	.fork-tabs {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 6px;
+	}
+
+	.fork-tab {
+		display: flex;
+		align-items: center;
+		gap: 0.3rem;
+		padding: 0.3rem 0.55rem;
+		background: var(--color-bg-alt);
+		border: 1.5px solid var(--color-border);
+		border-radius: 6px;
+		cursor: pointer;
+		font: inherit;
+		font-size: 0.75rem;
+		color: var(--color-text);
+		transition: all 0.12s ease;
+	}
+
+	.fork-tab:hover {
+		border-color: #a78bfa;
+		background: var(--color-surface);
+	}
+
+	.fork-tab.active {
+		background: linear-gradient(135deg, #faf5ff 0%, #eef2ff 100%);
+		border-color: #8b5cf6;
+		box-shadow: 0 1px 4px rgba(139, 92, 246, 0.12);
+	}
+
+	:global(.dark) .fork-tab.active {
+		background: linear-gradient(135deg, #2e106540 0%, #1e1b4b40 100%);
+		border-color: #7c3aed;
+	}
+
+	.fork-tab-dot {
+		width: 6px;
+		height: 6px;
+		border-radius: 50%;
+		background: var(--color-border);
+		flex-shrink: 0;
+	}
+
+	.fork-tab-dot.baseline {
+		background: var(--color-text-muted);
+	}
+
+	.fork-tab-dot.active {
+		background: #22c55e;
+	}
+
+	.fork-tab-name {
+		font-weight: 500;
+	}
+
+	.fork-tab.active .fork-tab-name {
+		font-weight: 600;
+		color: #581c87;
+	}
+
+	:global(.dark) .fork-tab.active .fork-tab-name {
+		color: #c4b5fd;
+	}
+
+	.fork-tab-tag {
+		font-size: 0.58rem;
+		font-weight: 500;
+		color: var(--color-text-light);
+		background: var(--color-bg-alt);
+		border-radius: 3px;
+		padding: 0 0.15rem;
+		margin-left: 0.15rem;
+	}
+
+	.fork-tab-meta {
+		font-size: 0.65rem;
+		color: var(--color-text-light);
+		margin-left: 0.15rem;
 	}
 </style>

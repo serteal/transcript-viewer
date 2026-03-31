@@ -1,6 +1,6 @@
 <script lang="ts">
-	import type { BranchTree, BranchLeaf } from '$lib/client/utils/branch-tree';
-	import { GitBranch, MessageSquare } from 'lucide-svelte';
+	import type { BranchTree, BranchLeaf, CheckpointNode } from '$lib/client/utils/branch-tree';
+	import { GitBranch, MessageSquare, ChevronRight, ChevronDown, FolderOpen, Folder } from 'lucide-svelte';
 
 	let {
 		tree,
@@ -13,297 +13,371 @@
 	} = $props();
 
 	const totalBranches = $derived(tree.allBranches.length);
-</script>
 
-<div class="branch-tree">
-	<div class="tree-header">
-		<GitBranch size={14} strokeWidth={2} />
-		<span class="tree-title">Audit Branches</span>
-		<span class="tree-count">{totalBranches}</span>
-	</div>
-
-	<div class="tree-body">
-		<!-- Shared prefix (setup) -->
-		{#if tree.sharedPrefix.length > 0}
-			<div class="tree-row">
-				<div class="tree-graph">
-					<div class="tree-dot trunk"></div>
-					<div class="tree-vline full"></div>
-				</div>
-				<div class="tree-info">
-					<span class="tree-label muted">Setup</span>
-					<span class="tree-meta">{tree.sharedPrefix.length} msgs</span>
-				</div>
-			</div>
-		{/if}
-
-		<!-- For each checkpoint: parent node + branch leaves -->
-		{#each tree.checkpoints as cp, ci (cp.label)}
-			{@const branches = tree.branchesByCheckpoint.get(cp.label) || []}
-			{@const isLastCheckpoint = ci === tree.checkpoints.length - 1}
-
-			<!-- Checkpoint parent node -->
-			<div class="tree-row">
-				<div class="tree-graph">
-					<div class="tree-dot checkpoint"></div>
-					{#if branches.length > 0}
-						<div class="tree-vline full"></div>
-					{/if}
-				</div>
-				<div class="tree-info">
-					<span class="tree-label checkpoint-label">{cp.label.replace(/-/g, ' ')}</span>
-				</div>
-			</div>
-
-			<!-- Branch leaves from this checkpoint -->
-			{#each branches as branch, bi (branch.id)}
-				{@const isActive = branch.id === activeBranchId}
-				{@const isLast = bi === branches.length - 1}
-				<button
-					type="button"
-					class="tree-row branch-row"
-					class:active={isActive}
-					onclick={() => onBranchSelect(branch.id)}
-				>
-					<div class="tree-graph branched">
-						<!-- Vertical line through the fork -->
-						{#if !isLast}
-							<div class="tree-vline full"></div>
-						{:else}
-							<div class="tree-vline half"></div>
-						{/if}
-						<!-- Horizontal fork line -->
-						<div class="tree-hline"></div>
-						<!-- Branch dot -->
-						<div class="tree-dot branch" class:active={isActive} class:baseline={branch.isBaseline}></div>
-					</div>
-					<div class="tree-info">
-						<span class="tree-label" class:active={isActive}>
-							{branch.label}
-							{#if branch.isBaseline}
-								<span class="tree-baseline-tag">baseline</span>
-							{/if}
-						</span>
-						<span class="tree-meta">
-							{branch.messages.length} msgs
-							{#if branch.sendMessageCount > 0}
-								<span class="tree-sends">
-									<MessageSquare size={10} strokeWidth={2} />
-									{branch.sendMessageCount}
-								</span>
-							{/if}
-						</span>
-					</div>
-				</button>
-			{/each}
-		{/each}
-	</div>
-</div>
-
-<style>
-	.branch-tree {
-		font-size: 0.82rem;
+	// Build a nested tree structure from flat checkpoints using parentCheckpointLabel
+	interface TreeItem {
+		type: 'checkpoint' | 'branch';
+		checkpoint?: CheckpointNode;
+		branch?: BranchLeaf;
+		children: TreeItem[];
+		depth: number;
 	}
 
-	.tree-header {
+	const nestedTree = $derived.by((): TreeItem[] => {
+		// Build checkpoint → children map
+		const cpMap = new Map<string, TreeItem>();
+
+		for (const cp of tree.checkpoints) {
+			cpMap.set(cp.label, {
+				type: 'checkpoint',
+				checkpoint: cp,
+				children: [],
+				depth: 0,
+			});
+		}
+
+		// Attach branches as children of their checkpoint
+		for (const cp of tree.checkpoints) {
+			const cpItem = cpMap.get(cp.label)!;
+			const branches = tree.branchesByCheckpoint.get(cp.label) || [];
+			for (const branch of branches) {
+				cpItem.children.push({
+					type: 'branch',
+					branch,
+					children: [],
+					depth: 0,
+				});
+			}
+		}
+
+		// Nest child checkpoints under their parent's baseline branch
+		// cp2 (parent=cp1) should appear inside cp1's baseline branch children
+		for (const cp of tree.checkpoints) {
+			if (cp.parentCheckpointLabel) {
+				const parentCpItem = cpMap.get(cp.parentCheckpointLabel);
+				if (parentCpItem) {
+					// Find the baseline branch of the parent
+					const baselineBranch = parentCpItem.children.find(
+						c => c.type === 'branch' && c.branch?.isBaseline
+					);
+					if (baselineBranch) {
+						baselineBranch.children.push(cpMap.get(cp.label)!);
+					}
+				}
+			}
+		}
+
+		// Collect top-level items: shared prefix + root checkpoints
+		const roots: TreeItem[] = [];
+		for (const cp of tree.checkpoints) {
+			if (!cp.parentCheckpointLabel) {
+				roots.push(cpMap.get(cp.label)!);
+			}
+		}
+
+		// Assign depths recursively
+		function assignDepth(items: TreeItem[], depth: number) {
+			for (const item of items) {
+				item.depth = depth;
+				assignDepth(item.children, depth + 1);
+			}
+		}
+		assignDepth(roots, 0);
+
+		return roots;
+	});
+
+	// Track expanded state for checkpoint nodes
+	let expandedCps = $state<Record<string, boolean>>({});
+
+	// Auto-expand all by default
+	$effect(() => {
+		const initial: Record<string, boolean> = {};
+		for (const cp of tree.checkpoints) {
+			if (expandedCps[cp.label] === undefined) {
+				initial[cp.label] = true;
+			}
+		}
+		if (Object.keys(initial).length > 0) {
+			expandedCps = { ...expandedCps, ...initial };
+		}
+	});
+
+	function toggleCp(label: string) {
+		expandedCps = { ...expandedCps, [label]: !expandedCps[label] };
+	}
+</script>
+
+<div class="btree">
+	<div class="btree-header">
+		<GitBranch size={14} strokeWidth={2} />
+		<span class="btree-title">Audit Branches</span>
+		<span class="btree-count">{totalBranches}</span>
+	</div>
+
+	<!-- Setup row -->
+	{#if tree.sharedPrefix.length > 0}
+		<div class="btree-row setup-row">
+			<span class="btree-icon">&#9679;</span>
+			<span class="btree-name muted">Setup</span>
+			<span class="btree-meta">{tree.sharedPrefix.length} msgs</span>
+		</div>
+	{/if}
+
+	<!-- Recursive tree rendering -->
+	{@render renderItems(nestedTree)}
+</div>
+
+{#snippet renderItems(items: TreeItem[])}
+	{#each items as item (item.type === 'checkpoint' ? item.checkpoint?.label : item.branch?.id)}
+		{#if item.type === 'checkpoint' && item.checkpoint}
+			{@const cp = item.checkpoint}
+			{@const expanded = expandedCps[cp.label] !== false}
+			{@const indent = item.depth}
+			<button
+				type="button"
+				class="btree-row cp-row"
+				style="padding-left: {indent * 16 + 4}px"
+				onclick={() => toggleCp(cp.label)}
+			>
+				<span class="btree-chevron">
+					{#if expanded}
+						<ChevronDown size={12} strokeWidth={2} />
+					{:else}
+						<ChevronRight size={12} strokeWidth={2} />
+					{/if}
+				</span>
+				<span class="btree-icon cp-icon">&#9670;</span>
+				<span class="btree-name cp-name">{cp.label.replace(/-/g, ' ')}</span>
+			</button>
+			{#if expanded}
+				{#each item.children as child (child.type === 'checkpoint' ? child.checkpoint?.label : child.branch?.id)}
+					{#if child.type === 'branch' && child.branch}
+						{@const branch = child.branch}
+						{@const isActive = branch.id === activeBranchId}
+						{@const hasChildren = child.children.length > 0}
+						<button
+							type="button"
+							class="btree-row branch-row"
+							class:active={isActive}
+							style="padding-left: {(indent + 1) * 16 + 4}px"
+							onclick={() => onBranchSelect(branch.id)}
+						>
+							<span class="btree-branch-line">
+								{#if hasChildren}
+									<span class="btree-branch-connector has-children"></span>
+								{:else}
+									<span class="btree-branch-connector"></span>
+								{/if}
+							</span>
+							<span class="btree-dot" class:active={isActive} class:baseline={branch.isBaseline}></span>
+							<span class="btree-name" class:active={isActive}>
+								{branch.label}
+								{#if branch.isBaseline}
+									<span class="btree-tag">baseline</span>
+								{/if}
+							</span>
+							<span class="btree-meta">
+								{branch.messages.length}
+								{#if branch.sendMessageCount > 0}
+									<span class="btree-sends">
+										<MessageSquare size={9} strokeWidth={2} />
+										{branch.sendMessageCount}
+									</span>
+								{/if}
+							</span>
+						</button>
+						<!-- Nested checkpoints under this branch -->
+						{#if child.children.length > 0}
+							{@render renderItems(child.children)}
+						{/if}
+					{:else if child.type === 'checkpoint'}
+						<!-- Checkpoint nested directly under parent (shouldn't happen with current logic, but safe) -->
+						{@render renderItems([child])}
+					{/if}
+				{/each}
+			{/if}
+		{/if}
+	{/each}
+{/snippet}
+
+<style>
+	.btree {
+		font-size: 0.8rem;
+	}
+
+	.btree-header {
 		display: flex;
 		align-items: center;
 		gap: 0.35rem;
 		color: var(--color-text-muted);
-		margin-bottom: 0.5rem;
+		margin-bottom: 0.4rem;
 	}
 
-	.tree-title {
+	.btree-title {
 		font-weight: 600;
-		font-size: 0.75rem;
+		font-size: 0.72rem;
 		text-transform: uppercase;
 		letter-spacing: 0.03em;
 	}
 
-	.tree-count {
+	.btree-count {
 		background: var(--color-bg-alt);
 		color: var(--color-text-muted);
 		border-radius: 999px;
-		padding: 0 0.35rem;
-		font-size: 0.65rem;
+		padding: 0 0.3rem;
+		font-size: 0.62rem;
 		font-weight: 600;
 	}
 
-	.tree-body {
-		display: flex;
-		flex-direction: column;
-	}
-
-	/* ---- Row layout ---- */
-	.tree-row {
+	/* ---- Rows ---- */
+	.btree-row {
 		display: flex;
 		align-items: center;
-		gap: 0.5rem;
-		min-height: 28px;
-		padding: 0.15rem 0;
-	}
-
-	.tree-row.branch-row {
-		cursor: pointer;
+		gap: 0.3rem;
+		min-height: 26px;
+		padding: 0.15rem 4px;
 		border: none;
 		background: transparent;
-		text-align: left;
-		border-radius: 4px;
-		padding: 0.2rem 0.35rem;
 		width: 100%;
+		text-align: left;
 		color: inherit;
 		font: inherit;
+		font-size: 0.78rem;
+		border-radius: 4px;
 	}
 
-	.tree-row.branch-row:hover {
+	.btree-row.cp-row {
+		cursor: pointer;
+	}
+
+	.btree-row.cp-row:hover {
 		background: var(--color-bg-alt);
 	}
 
-	.tree-row.branch-row.active {
+	.btree-row.branch-row {
+		cursor: pointer;
+	}
+
+	.btree-row.branch-row:hover {
+		background: var(--color-bg-alt);
+	}
+
+	.btree-row.branch-row.active {
 		background: var(--color-accent-bg, #F5EDE4);
 	}
 
-	/* ---- Graph column (dots + lines) ---- */
-	.tree-graph {
-		position: relative;
-		width: 20px;
-		min-height: 24px;
+	/* ---- Icons ---- */
+	.btree-icon {
+		flex-shrink: 0;
+		font-size: 0.55rem;
+		color: var(--color-text-muted);
+		width: 12px;
+		text-align: center;
+	}
+
+	.btree-icon.cp-icon {
+		color: #8b5cf6;
+		font-size: 0.65rem;
+	}
+
+	.btree-chevron {
+		flex-shrink: 0;
+		color: var(--color-text-muted);
+		display: flex;
+		align-items: center;
+		width: 14px;
+	}
+
+	/* ---- Branch line connector ---- */
+	.btree-branch-line {
+		flex-shrink: 0;
+		width: 14px;
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		flex-shrink: 0;
-		align-self: stretch;
 	}
 
-	.tree-dot {
+	.btree-branch-connector {
+		display: block;
 		width: 8px;
-		height: 8px;
-		border-radius: 50%;
-		z-index: 1;
-		flex-shrink: 0;
-	}
-
-	.tree-dot.trunk {
-		background: var(--color-text-muted);
-	}
-
-	.tree-dot.checkpoint {
-		background: #8b5cf6;
-		width: 10px;
-		height: 10px;
-		border-radius: 2px;
-		transform: rotate(45deg);
-	}
-
-	.tree-dot.branch {
+		height: 1px;
 		background: var(--color-border);
-		border: 2px solid var(--color-border);
 	}
 
-	.tree-dot.branch.baseline {
+	/* ---- Dot ---- */
+	.btree-dot {
+		flex-shrink: 0;
+		width: 7px;
+		height: 7px;
+		border-radius: 50%;
+		background: var(--color-border);
+		border: 1.5px solid var(--color-border);
+	}
+
+	.btree-dot.baseline {
 		background: var(--color-text-muted);
 		border-color: var(--color-text-muted);
 	}
 
-	.tree-dot.branch.active {
+	.btree-dot.active {
 		background: #22c55e;
 		border-color: #22c55e;
 	}
 
-	/* Vertical lines */
-	.tree-vline {
-		position: absolute;
-		left: 50%;
-		width: 2px;
-		background: var(--color-border);
-		transform: translateX(-50%);
-	}
-
-	.tree-vline.full {
-		top: 0;
-		bottom: 0;
-	}
-
-	.tree-vline.half {
-		top: 0;
-		bottom: 50%;
-	}
-
-	/* Branched graph: shift dot right, add horizontal line */
-	.tree-graph.branched {
-		justify-content: flex-end;
-		padding-right: 0;
-	}
-
-	.tree-hline {
-		position: absolute;
-		left: 50%;
-		right: 2px;
-		top: 50%;
-		height: 2px;
-		background: var(--color-border);
-		transform: translateY(-50%);
-	}
-
-	.tree-dot.branch {
-		margin-right: -2px;
-	}
-
-	/* ---- Info column ---- */
-	.tree-info {
-		display: flex;
-		flex-direction: column;
-		gap: 0.1rem;
-		min-width: 0;
+	/* ---- Text ---- */
+	.btree-name {
 		flex: 1;
-	}
-
-	.tree-label {
-		font-weight: 500;
-		color: var(--color-text);
-		white-space: nowrap;
+		min-width: 0;
 		overflow: hidden;
 		text-overflow: ellipsis;
+		white-space: nowrap;
+		font-weight: 500;
+		color: var(--color-text);
 	}
 
-	.tree-label.muted {
+	.btree-name.muted {
 		color: var(--color-text-muted);
 	}
 
-	.tree-label.active {
-		color: var(--color-text);
+	.btree-name.active {
 		font-weight: 600;
 	}
 
-	.tree-label.checkpoint-label {
+	.btree-name.cp-name {
 		color: #7c3aed;
-		font-size: 0.72rem;
 		font-weight: 600;
+		font-size: 0.72rem;
 		text-transform: capitalize;
 	}
 
-	.tree-baseline-tag {
-		font-size: 0.6rem;
+	.btree-tag {
+		font-size: 0.58rem;
 		font-weight: 500;
 		color: var(--color-text-light);
 		background: var(--color-bg-alt);
 		border-radius: 3px;
 		padding: 0 0.2rem;
-		margin-left: 0.25rem;
+		margin-left: 0.2rem;
 		vertical-align: middle;
 	}
 
-	.tree-meta {
+	.btree-meta {
+		flex-shrink: 0;
+		font-size: 0.65rem;
+		color: var(--color-text-light);
 		display: flex;
 		align-items: center;
-		gap: 0.4rem;
-		font-size: 0.7rem;
-		color: var(--color-text-light);
+		gap: 0.3rem;
 	}
 
-	.tree-sends {
+	.btree-sends {
 		display: inline-flex;
 		align-items: center;
-		gap: 0.15rem;
+		gap: 0.1rem;
+	}
+
+	.setup-row {
+		padding: 0.15rem 4px;
 	}
 </style>
