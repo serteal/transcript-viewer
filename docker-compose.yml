@@ -11,7 +11,7 @@ services:
       - NODE_ENV=production
       - ORIGIN=${ORIGIN:-http://localhost}
     volumes:
-      - ${TRANSCRIPT_HOST_DIR:-./outputs}:/data/transcripts:ro
+      - ${TRANSCRIPT_HOST_DIR:-./outputs}:/data/transcripts
       - ${USERS_FILE_HOST:-./users.json}:/data/users.json:ro
     # Not exposed directly — nginx fronts this
     expose:
