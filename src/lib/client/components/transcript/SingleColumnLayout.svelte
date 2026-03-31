@@ -1,7 +1,6 @@
 <script lang="ts">
 	import type { ConversationColumn, Event, UserComment, UserHighlight, BranchPoint, Branch, MessageWithMetadata } from '$lib/shared/types';
 	import MessageCard from '$lib/client/components/transcript/MessageCard.svelte';
-	import BranchPointComponent from '$lib/client/components/transcript/BranchPoint.svelte';
 	import { onMount, createEventDispatcher, tick } from 'svelte';
 	import { handleCopyAction, type CopyAction } from '$lib/client/utils/copy-utils';
 	import { findCommonPrefixLength } from '$lib/client/utils/branching';
@@ -425,11 +424,32 @@
 	<div class="messages-container">
 		{#each visibleMessages as item, i (item.type === 'message' ? `msg-${item.index}-${getMessageKey(item.message)}` : `bp-${'branchPoint' in item ? item.branchPoint.id : ''}`)}
 			{#if item.type === 'branch_point' && 'branchPoint' in item}
-				<BranchPointComponent
-					branchPoint={item.branchPoint}
-					activeBranchId={activeBranches[item.branchPoint.id] || item.branchPoint.branches[0]?.id || ''}
-					onBranchChange={handleBranchChange}
-				/>
+				{@const bp = item.branchPoint}
+				{@const currentBranchId = activeBranches[bp.id] || bp.branches[0]?.id || ''}
+				<div class="fork-switcher-wrapper">
+					<div class="fork-switcher">
+						<div class="fork-switcher-header">
+							<span class="fork-icon">&#9670;</span>
+							<span class="fork-label">Branch point</span>
+							<span class="fork-count">{bp.branches.length} branches</span>
+						</div>
+						<div class="fork-tabs">
+							{#each bp.branches as branch (branch.id)}
+								{@const isActive = branch.id === currentBranchId}
+								<button
+									type="button"
+									class="fork-tab"
+									class:active={isActive}
+									onclick={() => handleBranchChange(bp.id, branch.id)}
+								>
+									<span class="fork-tab-dot" class:active={isActive}></span>
+									<span class="fork-tab-name">{branch.name}</span>
+									<span class="fork-tab-meta">{branch.messageCount} msgs</span>
+								</button>
+							{/each}
+						</div>
+					</div>
+				</div>
 			{:else if item.type === 'message'}
 				{#if 'isForkPoint' in item && item.isForkPoint && forkSiblings.length > 0}
 					<!-- Inline branch switcher (sticky) -->
