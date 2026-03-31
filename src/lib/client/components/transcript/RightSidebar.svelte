@@ -303,18 +303,17 @@
 
 				{#if branchesExpanded}
 					<div class="section-content">
-						<div class="branches-list">
+						<div class="snapshot-branches">
 							{#each branches as branch}
 								<button
 									type="button"
-									class="branch-item"
+									class="snapshot-branch-item"
 									class:active={activeBranchId === branch.id}
 									onclick={() => onBranchSelect?.(branch.id)}
 								>
-									<span class="branch-indicator" class:active={activeBranchId === branch.id}></span>
-									<span class="branch-label">{branch.label}</span>
-									<span class="branch-name" title={branch.name}>{branch.name}</span>
-									<span class="branch-count">{branch.messageCount}</span>
+									<span class="snapshot-branch-dot" class:active={activeBranchId === branch.id}></span>
+									<span class="snapshot-branch-name" class:active={activeBranchId === branch.id} title={branch.name}>{branch.name}</span>
+									<span class="snapshot-branch-count">{branch.messageCount} msgs</span>
 								</button>
 							{/each}
 						</div>
@@ -628,75 +627,65 @@
 	}
 
 	/* Branches section styles */
-	.branches-list {
+	/* Snapshot branch list (target view fallback) */
+	.snapshot-branches {
 		display: flex;
 		flex-direction: column;
-		gap: 0.25rem;
-		padding: 0.25rem 0.5rem;
+		gap: 0.2rem;
 	}
 
-	.branch-item {
+	.snapshot-branch-item {
 		display: flex;
 		align-items: center;
-		gap: 0.5rem;
+		gap: 0.35rem;
 		width: 100%;
-		padding: 0.5rem 0.75rem;
-		background: var(--color-surface);
-		border: 1px solid var(--color-border);
-		border-radius: 6px;
+		padding: 0.3rem 0.5rem;
+		background: transparent;
+		border: none;
+		border-radius: 4px;
 		cursor: pointer;
-		font-size: 0.8rem;
-		transition: all var(--transition-fast);
+		font: inherit;
+		font-size: 0.78rem;
 		text-align: left;
+		color: inherit;
 	}
 
-	.branch-item:hover {
+	.snapshot-branch-item:hover {
 		background: var(--color-bg-alt);
-		border-color: var(--color-text-muted);
 	}
 
-	.branch-item.active {
-		background: #f3e8ff;
-		border-color: #7c3aed;
+	.snapshot-branch-item.active {
+		background: var(--color-accent-bg, #F5EDE4);
 	}
 
-	.branch-indicator {
-		width: 8px;
-		height: 8px;
+	.snapshot-branch-dot {
+		width: 7px;
+		height: 7px;
 		border-radius: 50%;
 		background: var(--color-border);
 		flex-shrink: 0;
 	}
 
-	.branch-indicator.active {
-		background: #7c3aed;
+	.snapshot-branch-dot.active {
+		background: #22c55e;
 	}
 
-	.branch-label {
-		font-weight: 600;
-		color: var(--color-text);
-		flex-shrink: 0;
-	}
-
-	.branch-name {
+	.snapshot-branch-name {
 		flex: 1;
-		color: var(--color-text-muted);
+		font-weight: 500;
+		color: var(--color-text);
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
 	}
 
-	.branch-count {
-		font-size: 0.75rem;
-		color: var(--color-text-light);
-		background: var(--color-bg-alt);
-		padding: 2px 6px;
-		border-radius: 4px;
-		flex-shrink: 0;
+	.snapshot-branch-name.active {
+		font-weight: 600;
 	}
 
-	.branch-item.active .branch-count {
-		background: #7c3aed;
-		color: white;
+	.snapshot-branch-count {
+		font-size: 0.65rem;
+		color: var(--color-text-light);
+		flex-shrink: 0;
 	}
 </style>
