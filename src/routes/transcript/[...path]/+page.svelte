@@ -20,6 +20,7 @@ import FilterDropdown from '$lib/client/components/FilterDropdown.svelte';
 	import { collectViews, computeConversationColumns } from '$lib/client/utils/branching';
 	import { buildCitationLookup } from '$lib/client/utils/citation-utils';
 	import { collectToolFunctions } from '$lib/client/utils/tool-pairing';
+	import { hasBranchingPattern, parseBranchTree, type BranchTree } from '$lib/client/utils/branch-tree';
 	import { onMount, setContext, tick } from 'svelte';
 	import markdownit from 'markdown-it';
 	import { Settings, User, Plus, MessageSquare, Filter as FilterIcon, Star, PanelRight, Search, Play, Command, Tag, RefreshCw, Copy, Check } from 'lucide-svelte';
@@ -240,6 +241,15 @@ import FilterDropdown from '$lib/client/components/FilterDropdown.svelte';
 	const branchCount = $derived.by(() => {
 		const combinedCols = computeConversationColumns(transcript.events, 'combined');
 		return combinedCols.length;
+	});
+
+	// Branch tree computed from combined view — shared across all tabs
+	const globalBranchTree = $derived.by((): BranchTree | null => {
+		const combinedCols = computeConversationColumns(transcript.events, 'combined');
+		if (combinedCols.length === 0) return null;
+		const msgs = combinedCols[0].messages;
+		if (!hasBranchingPattern(msgs)) return null;
+		return parseBranchTree(msgs);
 	});
 
 	// Message info lookup for highlights - maps message_id to { messageNumber, sourceLabel }
@@ -758,11 +768,8 @@ import FilterDropdown from '$lib/client/components/FilterDropdown.svelte';
 		return activeBranches['branch-0'];
 	});
 
-	// Branch tree data for sidebar (checkpoint/restore pattern)
-	const sidebarBranchTree = $derived.by(() => {
-		if (!singleColumnLayoutRef) return null;
-		return singleColumnLayoutRef.getBranchTree();
-	});
+	// Branch tree for sidebar — always from combined view, shared across all tabs
+	const sidebarBranchTree = $derived(globalBranchTree);
 
 	const sidebarActiveTreeBranchId = $derived.by(() => {
 		if (!singleColumnLayoutRef) return '';
@@ -1449,7 +1456,7 @@ import FilterDropdown from '$lib/client/components/FilterDropdown.svelte';
 			<pre class="raw-data">{JSON.stringify(transcript, null, 2)}</pre>
 		{:else}
 			<section class="viewer-section">
-				<SingleColumnLayout bind:this={singleColumnLayoutRef} columns={columns} transcriptEvents={transcript.events} showShared={settings.value.showSharedHistory} renderMarkdown={settings.value.renderMarkdown} fullWidth={settings.value.fullWidth} filePath={absolutePath} transcriptId={meta.transcript_id} on:ready={stopColumnsLoading} comments={userComments} highlights={userHighlights} onAddComment={handleAddComment} onDeleteComment={handleDeleteComment} onAddHighlight={handleAddHighlight} onOpenCommentModal={openCommentModal} messageFilter={activeFilters.length > 0 ? messageMatchesFilters : undefined} isCompact={settings.value.compactToolCalls} {toolTypeFilter} auditorModel={meta.auditor_model} targetModel={meta.target_model} />
+				<SingleColumnLayout bind:this={singleColumnLayoutRef} columns={columns} transcriptEvents={transcript.events} showShared={settings.value.showSharedHistory} renderMarkdown={settings.value.renderMarkdown} fullWidth={settings.value.fullWidth} filePath={absolutePath} transcriptId={meta.transcript_id} on:ready={stopColumnsLoading} comments={userComments} highlights={userHighlights} onAddComment={handleAddComment} onDeleteComment={handleDeleteComment} onAddHighlight={handleAddHighlight} onOpenCommentModal={openCommentModal} messageFilter={activeFilters.length > 0 ? messageMatchesFilters : undefined} isCompact={settings.value.compactToolCalls} {toolTypeFilter} auditorModel={meta.auditor_model} targetModel={meta.target_model} externalBranchTree={globalBranchTree} />
 				{#if showColumnsSpinner}
 					<div class="columns-overlay" aria-live="polite" aria-busy={columnsLoading}>
 						<div class="spinner"></div>

@@ -26,6 +26,7 @@
 		toolTypeFilter,
 		auditorModel,
 		targetModel,
+		externalBranchTree,
 	}: {
 		columns: ConversationColumn[];
 		transcriptEvents?: Event[];
@@ -45,6 +46,7 @@
 		toolTypeFilter?: Set<string>;
 		auditorModel?: string;
 		targetModel?: string;
+		externalBranchTree?: BranchTree | null;
 	} = $props();
 
 	// Dispatch "ready" when content is rendered
@@ -67,10 +69,11 @@
 	// Branch Tree detection (checkpoint/restore pattern in combined view)
 	// =========================================================================
 
-	// Check if the first column has checkpoint/restore branching
+	// Use external branch tree (computed from combined view at page level) if provided,
+	// otherwise detect from current columns
 	const branchTree = $derived.by((): BranchTree | null => {
+		if (externalBranchTree) return externalBranchTree;
 		if (columns.length === 0) return null;
-		// Use the first (or only) column's messages
 		const msgs = columns[0].messages;
 		if (!hasBranchingPattern(msgs)) return null;
 		return parseBranchTree(msgs);
