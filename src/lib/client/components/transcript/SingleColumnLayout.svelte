@@ -77,7 +77,7 @@
 		return parseBranchTree(msgs);
 	});
 
-	const useBranchTree = $derived(branchTree !== null && branchTree.segments.length > 1);
+	const useBranchTree = $derived(branchTree !== null && branchTree.allBranches.length > 1);
 
 	// Active branch for branch tree mode
 	let activeTreeBranchId = $state<string>('');

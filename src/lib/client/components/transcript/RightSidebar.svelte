@@ -258,7 +258,7 @@
 		</section>
 
 		<!-- Branch Tree Section (checkpoint/restore pattern) -->
-		{#if branchTree && branchTree.segments.length > 1}
+		{#if branchTree && branchTree.allBranches.length > 1}
 			<section class="sidebar-section">
 				<button
 					type="button"
@@ -271,7 +271,7 @@
 					{:else}
 						<ChevronRight size={16} />
 					{/if}
-					<span class="section-title">Branches ({branchTree.segments.length})</span>
+					<span class="section-title">Branches ({branchTree.allBranches.length})</span>
 				</button>
 
 				{#if branchesExpanded}
