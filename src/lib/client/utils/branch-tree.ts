@@ -307,6 +307,26 @@ function inferBranchLabel(messages: MessageWithMetadata[], index: number): strin
 	return `Branch ${index}`;
 }
 
+/**
+ * Map a tree branch ID to a snapshot column index.
+ * Used for target view where branches are separate columns, not checkpoint/restore.
+ *
+ * Baseline branches → column 0 (the "main" snapshot)
+ * Nth non-baseline branch (sorted by startIndex) → column N
+ */
+export function mapBranchToColumnIndex(tree: BranchTree, branchId: string): number {
+	const branch = tree.allBranches.find(b => b.id === branchId);
+	if (!branch || branch.isBaseline) return 0;
+
+	// Get all non-baseline branches sorted by start index
+	const restoreBranches = tree.allBranches
+		.filter(b => !b.isBaseline)
+		.sort((a, b) => a.startIndex - b.startIndex);
+
+	const restoreIndex = restoreBranches.findIndex(b => b.id === branchId);
+	return restoreIndex >= 0 ? restoreIndex + 1 : 0;
+}
+
 function countSendMessages(messages: MessageWithMetadata[]): number {
 	let count = 0;
 	for (const msg of messages) {

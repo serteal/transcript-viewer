@@ -28,13 +28,6 @@
 		requestAnimationFrame(animate);
 	}
 
-	// Branch info type for sidebar display
-	type BranchInfo = {
-		id: string;
-		label: string;
-		name: string;
-		messageCount: number;
-	};
 
 	// Sidebar width constants
 	const MIN_WIDTH = 280;
@@ -109,10 +102,6 @@
 		startTime,
 		endTime,
 		duration,
-		// Branch props
-		branches = [],
-		activeBranchId,
-		onBranchSelect,
 		// Branch tree props
 		branchTree,
 		activeSegmentId,
@@ -135,10 +124,6 @@
 		startTime?: string;
 		endTime?: string;
 		duration?: string;
-		// Branch props
-		branches?: BranchInfo[];
-		activeBranchId?: string;
-		onBranchSelect?: (branchId: string) => void;
 		// Branch tree props
 		branchTree?: BranchTree | null;
 		activeSegmentId?: string;
@@ -281,42 +266,6 @@
 							activeBranchId={activeSegmentId || branchTree.allBranches[0]?.id || ''}
 							onBranchSelect={(id) => onSegmentSelect?.(id)}
 						/>
-					</div>
-				{/if}
-			</section>
-		<!-- Snapshot Branches Section (fallback for target view) -->
-		{:else if branches.length > 1}
-			<section class="sidebar-section">
-				<button
-					type="button"
-					class="section-header"
-					onclick={() => branchesExpanded = !branchesExpanded}
-					aria-expanded={branchesExpanded}
-				>
-					{#if branchesExpanded}
-						<ChevronDown size={16} />
-					{:else}
-						<ChevronRight size={16} />
-					{/if}
-					<span class="section-title">Branches ({branches.length})</span>
-				</button>
-
-				{#if branchesExpanded}
-					<div class="section-content">
-						<div class="snapshot-branches">
-							{#each branches as branch}
-								<button
-									type="button"
-									class="snapshot-branch-item"
-									class:active={activeBranchId === branch.id}
-									onclick={() => onBranchSelect?.(branch.id)}
-								>
-									<span class="snapshot-branch-dot" class:active={activeBranchId === branch.id}></span>
-									<span class="snapshot-branch-name" class:active={activeBranchId === branch.id} title={branch.name}>{branch.name}</span>
-									<span class="snapshot-branch-count">{branch.messageCount} msgs</span>
-								</button>
-							{/each}
-						</div>
 					</div>
 				{/if}
 			</section>
@@ -627,65 +576,4 @@
 	}
 
 	/* Branches section styles */
-	/* Snapshot branch list (target view fallback) */
-	.snapshot-branches {
-		display: flex;
-		flex-direction: column;
-		gap: 0.2rem;
-	}
-
-	.snapshot-branch-item {
-		display: flex;
-		align-items: center;
-		gap: 0.35rem;
-		width: 100%;
-		padding: 0.3rem 0.5rem;
-		background: transparent;
-		border: none;
-		border-radius: 4px;
-		cursor: pointer;
-		font: inherit;
-		font-size: 0.78rem;
-		text-align: left;
-		color: inherit;
-	}
-
-	.snapshot-branch-item:hover {
-		background: var(--color-bg-alt);
-	}
-
-	.snapshot-branch-item.active {
-		background: var(--color-accent-bg, #F5EDE4);
-	}
-
-	.snapshot-branch-dot {
-		width: 7px;
-		height: 7px;
-		border-radius: 50%;
-		background: var(--color-border);
-		flex-shrink: 0;
-	}
-
-	.snapshot-branch-dot.active {
-		background: #22c55e;
-	}
-
-	.snapshot-branch-name {
-		flex: 1;
-		font-weight: 500;
-		color: var(--color-text);
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-	}
-
-	.snapshot-branch-name.active {
-		font-weight: 600;
-	}
-
-	.snapshot-branch-count {
-		font-size: 0.65rem;
-		color: var(--color-text-light);
-		flex-shrink: 0;
-	}
 </style>

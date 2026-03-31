@@ -5,7 +5,7 @@
 	import { handleCopyAction, type CopyAction } from '$lib/client/utils/copy-utils';
 	import { findCommonPrefixLength } from '$lib/client/utils/branching';
 	import { buildToolResultMap, getConsumedToolMessageIds, isConsumedMessage } from '$lib/client/utils/tool-pairing';
-	import { hasBranchingPattern, parseBranchTree, getMessagesForBranch, type BranchTree } from '$lib/client/utils/branch-tree';
+	import { hasBranchingPattern, parseBranchTree, getMessagesForBranch, mapBranchToColumnIndex, type BranchTree } from '$lib/client/utils/branch-tree';
 
 	let {
 		columns,
@@ -26,7 +26,10 @@
 		toolTypeFilter,
 		auditorModel,
 		targetModel,
-		externalBranchTree,
+		// Branch tree props (managed at page level)
+		globalBranchTree = null,
+		activeTreeBranchId = '',
+		onTreeBranchChange,
 	}: {
 		columns: ConversationColumn[];
 		transcriptEvents?: Event[];
@@ -46,10 +49,11 @@
 		toolTypeFilter?: Set<string>;
 		auditorModel?: string;
 		targetModel?: string;
-		externalBranchTree?: BranchTree | null;
+		globalBranchTree?: BranchTree | null;
+		activeTreeBranchId?: string;
+		onTreeBranchChange?: (branchId: string) => void;
 	} = $props();
 
-	// Dispatch "ready" when content is rendered
 	const dispatch = createEventDispatcher<{ ready: void }>();
 
 	onMount(async () => {
@@ -66,170 +70,109 @@
 	});
 
 	// =========================================================================
-	// Branch Tree detection (checkpoint/restore pattern in combined view)
+	// Is branching active? (globalBranchTree provided with >1 branches)
 	// =========================================================================
 
-	// Use external branch tree (computed from combined view at page level) if provided,
-	// otherwise detect from current columns
-	const branchTree = $derived.by((): BranchTree | null => {
-		if (externalBranchTree) return externalBranchTree;
+	const hasBranching = $derived(
+		globalBranchTree !== null && globalBranchTree.allBranches.length > 1
+	);
+
+	// =========================================================================
+	// View-local branch tree (for message resolution)
+	// Combined/Auditor views have checkpoint/restore → own tree
+	// Target view has multiple columns → map via column index
+	// =========================================================================
+
+	const localBranchTree = $derived.by((): BranchTree | null => {
+		if (!hasBranching) return null;
 		if (columns.length === 0) return null;
 		const msgs = columns[0].messages;
-		if (!hasBranchingPattern(msgs)) return null;
-		return parseBranchTree(msgs);
-	});
-
-	const useBranchTree = $derived(branchTree !== null && branchTree.allBranches.length > 1);
-
-	// Active branch for branch tree mode
-	let activeTreeBranchId = $state<string>('');
-
-	// Initialize to first baseline branch when tree changes
-	$effect(() => {
-		if (branchTree && branchTree.allBranches.length > 0) {
-			if (!branchTree.allBranches.find(b => b.id === activeTreeBranchId)) {
-				// Default to the first baseline branch
-				const firstBaseline = branchTree.allBranches.find(b => b.isBaseline);
-				activeTreeBranchId = firstBaseline?.id || branchTree.allBranches[0].id;
-			}
+		if (hasBranchingPattern(msgs)) {
+			return parseBranchTree(msgs);
 		}
+		return null;
 	});
 
-	// Messages for the active branch tree leaf
-	const treeMessages = $derived.by(() => {
-		if (!branchTree) return [];
-		const { messages } = getMessagesForBranch(branchTree, activeTreeBranchId);
-		return messages;
+	// Does this view have multiple columns (target view snapshot branching)?
+	const hasMultipleColumns = $derived(columns.length > 1);
+
+	// =========================================================================
+	// Message resolution: get messages for the active branch
+	// =========================================================================
+
+	const resolvedMessages = $derived.by((): { messages: MessageWithMetadata[]; forkIndex: number } => {
+		if (!hasBranching || !activeTreeBranchId) {
+			// No branching — show all messages from first column
+			return {
+				messages: columns.length > 0 ? columns[0].messages : [],
+				forkIndex: 0,
+			};
+		}
+
+		// Case 1: View has its own checkpoint/restore tree (combined/auditor)
+		if (localBranchTree && localBranchTree.allBranches.length > 1) {
+			// Find matching branch by ID (IDs use checkpoint labels, same across views)
+			const localBranch = localBranchTree.allBranches.find(b => b.id === activeTreeBranchId);
+			if (localBranch) {
+				return getMessagesForBranch(localBranchTree, activeTreeBranchId);
+			}
+			// Fallback: if ID doesn't match (shouldn't happen), show first branch
+			return getMessagesForBranch(localBranchTree, localBranchTree.allBranches[0].id);
+		}
+
+		// Case 2: View has multiple columns but no checkpoint/restore (target)
+		if (hasMultipleColumns && globalBranchTree) {
+			const colIndex = mapBranchToColumnIndex(globalBranchTree, activeTreeBranchId);
+			const safeIndex = Math.min(colIndex, columns.length - 1);
+			return {
+				messages: columns[safeIndex].messages,
+				forkIndex: 0,
+			};
+		}
+
+		// Case 3: Single column, no local tree — show all messages
+		return {
+			messages: columns.length > 0 ? columns[0].messages : [],
+			forkIndex: 0,
+		};
 	});
 
-	const treeForkIndex = $derived.by(() => {
-		if (!branchTree) return 0;
-		const { forkIndex } = getMessagesForBranch(branchTree, activeTreeBranchId);
-		return forkIndex;
-	});
-
-	// Sibling branches at the current fork point (for inline switcher)
+	// Fork switcher data — always from globalBranchTree for consistency
 	const forkSiblings = $derived.by(() => {
-		if (!branchTree) return [];
-		const activeBranch = branchTree.allBranches.find(b => b.id === activeTreeBranchId);
+		if (!globalBranchTree || !activeTreeBranchId) return [];
+		const activeBranch = globalBranchTree.allBranches.find(b => b.id === activeTreeBranchId);
 		if (!activeBranch) return [];
-		return branchTree.branchesByCheckpoint.get(activeBranch.checkpoint.label) || [];
+		return globalBranchTree.branchesByCheckpoint.get(activeBranch.checkpoint.label) || [];
 	});
 
 	const forkCheckpointLabel = $derived.by(() => {
-		if (!branchTree) return '';
-		const activeBranch = branchTree.allBranches.find(b => b.id === activeTreeBranchId);
+		if (!globalBranchTree || !activeTreeBranchId) return '';
+		const activeBranch = globalBranchTree.allBranches.find(b => b.id === activeTreeBranchId);
 		return activeBranch?.checkpoint.label.replace(/-/g, ' ') || '';
 	});
 
 	// =========================================================================
-	// Snapshot-based branching (existing approach for target view)
+	// Tool result pairing
 	// =========================================================================
 
-	let activeBranches = $state<Record<string, string>>({});
-
-	const branchData = $derived.by(() => {
-		if (useBranchTree) {
-			// When using branch tree, no snapshot-based branching
-			return { sharedMessages: [] as MessageWithMetadata[], branchPoints: [] as BranchPoint[] };
-		}
-
-		if (columns.length === 0) {
-			return { sharedMessages: [], branchPoints: [] };
-		}
-
-		if (columns.length === 1) {
-			return {
-				sharedMessages: columns[0].messages,
-				branchPoints: []
-			};
-		}
-
-		let sharedCount = columns[0].messages.length;
-		for (let i = 1; i < columns.length; i++) {
-			const prefixLen = findCommonPrefixLength(
-				columns[0].messages as any[],
-				columns[i].messages as any[]
-			);
-			sharedCount = Math.min(sharedCount, prefixLen);
-		}
-
-		const sharedMessages = columns[0].messages.slice(0, sharedCount);
-
-		const branches: Branch[] = columns.map((col, i) => {
-			const label = String.fromCharCode(65 + i);
-			const branchMessages = col.messages.slice(sharedCount);
-			return {
-				id: `branch-0-${label.toLowerCase()}`,
-				label,
-				name: col.title || `Branch ${label}`,
-				description: '',
-				messageCount: branchMessages.length,
-				messages: branchMessages
-			};
-		});
-
-		const branchPoint: BranchPoint = {
-			id: 'branch-0',
-			type: 'branch_point',
-			afterMessageIndex: sharedCount,
-			sharedMessages,
-			branches
-		};
-
-		return {
-			sharedMessages,
-			branchPoints: [branchPoint]
-		};
-	});
-
-	// =========================================================================
-	// Tool result pairing (works for both modes)
-	// =========================================================================
-
-	const allVisibleMessages = $derived.by(() => {
-		if (useBranchTree) return treeMessages;
-
-		const msgs: MessageWithMetadata[] = [];
-		msgs.push(...branchData.sharedMessages);
-		for (const bp of branchData.branchPoints) {
-			const activeBranchId = activeBranches[bp.id] || bp.branches[0]?.id;
-			const activeBranch = bp.branches.find(b => b.id === activeBranchId);
-			if (activeBranch) {
-				msgs.push(...activeBranch.messages);
-			}
-		}
-		return msgs;
-	});
-
+	const allVisibleMessages = $derived(resolvedMessages.messages);
 	const toolResultMap = $derived(buildToolResultMap(allVisibleMessages));
 	const consumedToolIds = $derived(getConsumedToolMessageIds(allVisibleMessages));
 
 	// =========================================================================
-	// Snapshot branch management
+	// Visible message items for rendering
 	// =========================================================================
 
-	$effect(() => {
-		if (useBranchTree) return; // skip when using tree mode
-		const newActiveBranches: Record<string, string> = {};
-		for (const bp of branchData.branchPoints) {
-			if (!activeBranches[bp.id] && bp.branches.length > 0) {
-				const defaultBranch = bp.branches.reduce((best, current) =>
-					current.messages.length > best.messages.length ? current : best
-				);
-				newActiveBranches[bp.id] = defaultBranch.id;
-			} else if (activeBranches[bp.id]) {
-				newActiveBranches[bp.id] = activeBranches[bp.id];
-			}
-		}
-		if (JSON.stringify(newActiveBranches) !== JSON.stringify(activeBranches)) {
-			activeBranches = newActiveBranches;
-		}
-	});
+	const visibleItems = $derived.by(() => {
+		const msgs = resolvedMessages.messages;
+		const forkIdx = resolvedMessages.forkIndex;
 
-	function handleBranchChange(branchPointId: string, branchId: string) {
-		activeBranches = { ...activeBranches, [branchPointId]: branchId };
-	}
+		return msgs.map((msg, i) => ({
+			message: msg,
+			index: i,
+			isForkPoint: hasBranching && i === forkIdx && forkIdx > 0,
+		}));
+	});
 
 	// =========================================================================
 	// Filtering helpers
@@ -250,48 +193,6 @@
 		}
 		return true;
 	}
-
-	// =========================================================================
-	// Visible messages (unified for both modes)
-	// =========================================================================
-
-	const visibleMessages = $derived.by(() => {
-		if (useBranchTree) {
-			// Tree mode: flat list from shared prefix + active segment
-			return treeMessages.map((msg, i) => ({
-				type: 'message' as const,
-				message: msg,
-				index: i,
-				isForkPoint: i === treeForkIndex && treeForkIndex > 0,
-			}));
-		}
-
-		// Snapshot mode (existing)
-		const result: Array<{ type: 'message'; message: MessageWithMetadata; index: number; isForkPoint?: boolean } | { type: 'branch_point'; branchPoint: BranchPoint }> = [];
-
-		branchData.sharedMessages.forEach((msg, i) => {
-			result.push({ type: 'message', message: msg, index: i });
-		});
-
-		for (const bp of branchData.branchPoints) {
-			result.push({ type: 'branch_point', branchPoint: bp });
-
-			const activeBranchId = activeBranches[bp.id] || bp.branches[0]?.id;
-			const activeBranch = bp.branches.find(b => b.id === activeBranchId);
-
-			if (activeBranch) {
-				activeBranch.messages.forEach((msg, i) => {
-					result.push({
-						type: 'message',
-						message: msg,
-						index: branchData.sharedMessages.length + i
-					});
-				});
-			}
-		}
-
-		return result;
-	});
 
 	// =========================================================================
 	// Message helpers
@@ -357,65 +258,38 @@
 	// =========================================================================
 
 	export function getBranchData() {
-		return branchData;
+		return { sharedMessages: [] as MessageWithMetadata[], branchPoints: [] as BranchPoint[] };
 	}
 
 	export function getActiveBranches() {
-		return activeBranches;
+		return {} as Record<string, string>;
 	}
 
-	export function switchToBranch(branchPointId: string, branchId: string) {
-		handleBranchChange(branchPointId, branchId);
-	}
-
-	/** Get the branch tree (if checkpoint/restore pattern detected) */
-	export function getBranchTree(): BranchTree | null {
-		return branchTree;
-	}
-
-	/** Get the active branch ID for branch tree mode */
-	export function getActiveTreeBranchId(): string {
-		return activeTreeBranchId;
-	}
-
-	/** Switch to a specific branch in the branch tree */
-	export function switchToTreeBranch(branchId: string) {
-		activeTreeBranchId = branchId;
+	export function switchToBranch(_branchPointId: string, _branchId: string) {
+		// No-op — branching is now managed at page level
 	}
 
 	export async function switchToBranchContainingMessage(messageId: string): Promise<boolean> {
-		if (useBranchTree && branchTree) {
-			// Check shared prefix
-			if (branchTree.sharedPrefix.some(m => (m as any).id === messageId)) {
-				await tick();
-				return true;
-			}
-			// Check each branch leaf
-			for (const branch of branchTree.allBranches) {
-				if (branch.messages.some(m => (m as any).id === messageId)) {
-					activeTreeBranchId = branch.id;
-					await tick();
-					return true;
-				}
-			}
-			return false;
-		}
-
-		// Snapshot mode
-		const inShared = branchData.sharedMessages.some(m => (m as any).id === messageId);
-		if (inShared) {
+		// Check current resolved messages
+		const found = resolvedMessages.messages.some(m => (m as any).id === messageId);
+		if (found) {
 			await tick();
 			return true;
 		}
 
-		for (const bp of branchData.branchPoints) {
-			for (const branch of bp.branches) {
-				const found = branch.messages.some(m => (m as any).id === messageId);
-				if (found) {
-					activeBranches = { ...activeBranches, [bp.id]: branch.id };
+		// If branching is active, search all branches
+		if (globalBranchTree) {
+			for (const branch of globalBranchTree.allBranches) {
+				if (branch.messages.some(m => (m as any).id === messageId)) {
+					onTreeBranchChange?.(branch.id);
 					await tick();
 					return true;
 				}
+			}
+			// Also check shared prefix
+			if (globalBranchTree.sharedPrefix.some(m => (m as any).id === messageId)) {
+				await tick();
+				return true;
 			}
 		}
 
@@ -425,95 +299,66 @@
 
 <div class="single-column-layout" class:constrained={!fullWidth} class:full-width={fullWidth}>
 	<div class="messages-container">
-		{#each visibleMessages as item, i (item.type === 'message' ? `msg-${item.index}-${getMessageKey(item.message)}` : `bp-${'branchPoint' in item ? item.branchPoint.id : ''}`)}
-			{#if item.type === 'branch_point' && 'branchPoint' in item}
-				{@const bp = item.branchPoint}
-				{@const currentBranchId = activeBranches[bp.id] || bp.branches[0]?.id || ''}
+		{#each visibleItems as item, i (`msg-${item.index}-${getMessageKey(item.message)}`)}
+			{#if item.isForkPoint && forkSiblings.length > 0}
+				<!-- Inline branch switcher (sticky) -->
 				<div class="fork-switcher-wrapper">
 					<div class="fork-switcher">
 						<div class="fork-switcher-header">
 							<span class="fork-icon">&#9670;</span>
-							<span class="fork-label">Branch point</span>
-							<span class="fork-count">{bp.branches.length} branches</span>
+							<span class="fork-label">{forkCheckpointLabel}</span>
+							<span class="fork-count">{forkSiblings.length} branches</span>
 						</div>
 						<div class="fork-tabs">
-							{#each bp.branches as branch (branch.id)}
-								{@const isActive = branch.id === currentBranchId}
+							{#each forkSiblings as sibling (sibling.id)}
+								{@const isActive = sibling.id === activeTreeBranchId}
 								<button
 									type="button"
 									class="fork-tab"
 									class:active={isActive}
-									onclick={() => handleBranchChange(bp.id, branch.id)}
+									onclick={() => onTreeBranchChange?.(sibling.id)}
 								>
-									<span class="fork-tab-dot" class:active={isActive}></span>
-									<span class="fork-tab-name">{branch.name}</span>
-									<span class="fork-tab-meta">{branch.messageCount} msgs</span>
+									<span class="fork-tab-dot" class:active={isActive} class:baseline={sibling.isBaseline}></span>
+									<span class="fork-tab-name">
+										{sibling.label}
+										{#if sibling.isBaseline}
+											<span class="fork-tab-tag">baseline</span>
+										{/if}
+									</span>
+									<span class="fork-tab-meta">
+										{sibling.messages.length} msgs
+										{#if sibling.sendMessageCount > 0}
+											&middot; {sibling.sendMessageCount} sent
+										{/if}
+									</span>
 								</button>
 							{/each}
 						</div>
 					</div>
 				</div>
-			{:else if item.type === 'message'}
-				{#if 'isForkPoint' in item && item.isForkPoint && forkSiblings.length > 0}
-					<!-- Inline branch switcher (sticky) -->
-					<div class="fork-switcher-wrapper">
-						<div class="fork-switcher">
-							<div class="fork-switcher-header">
-								<span class="fork-icon">&#9670;</span>
-								<span class="fork-label">{forkCheckpointLabel}</span>
-								<span class="fork-count">{forkSiblings.length} branches</span>
-							</div>
-							<div class="fork-tabs">
-								{#each forkSiblings as sibling (sibling.id)}
-									{@const isActive = sibling.id === activeTreeBranchId}
-									<button
-										type="button"
-										class="fork-tab"
-										class:active={isActive}
-										onclick={() => { activeTreeBranchId = sibling.id; }}
-									>
-										<span class="fork-tab-dot" class:active={isActive} class:baseline={sibling.isBaseline}></span>
-										<span class="fork-tab-name">
-											{sibling.label}
-											{#if sibling.isBaseline}
-												<span class="fork-tab-tag">baseline</span>
-											{/if}
-										</span>
-										<span class="fork-tab-meta">
-											{sibling.messages.length} msgs
-											{#if sibling.sendMessageCount > 0}
-												&middot; {sibling.sendMessageCount} sent
-											{/if}
-										</span>
-									</button>
-								{/each}
-							</div>
-						</div>
-					</div>
-				{/if}
-				{#if shouldShowMessage(item.message, item.index) && matchesToolTypeFilter(item.message) && (!messageFilter || messageFilter(item.message, item.index))}
-					<MessageCard
-						msg={item.message}
-						isVisible={showShared || !item.message.isShared}
-						isOpen={isOpenFor(item.message)}
-						onToggle={() => toggleOpenFor(item.message)}
-						messageIndex={item.index}
-						columnIndex={0}
-						{renderMarkdown}
-						{filePath}
-						{transcriptId}
-						onCopy={(action) => handleCopy(action)}
-						comments={getCommentsForMessage(item.message, item.index)}
-						highlights={getHighlightsForMessage(item.message, item.index)}
-						{onAddComment}
-						{onDeleteComment}
-						{onAddHighlight}
-						{onOpenCommentModal}
-						{toolResultMap}
-						{isCompact}
-						actorLabel={getActorLabel(item.message)}
-					/>
-				{/if}
+			{/if}
+			{#if shouldShowMessage(item.message, item.index) && matchesToolTypeFilter(item.message) && (!messageFilter || messageFilter(item.message, item.index))}
+				<MessageCard
+					msg={item.message}
+					isVisible={showShared || !item.message.isShared}
+					isOpen={isOpenFor(item.message)}
+					onToggle={() => toggleOpenFor(item.message)}
+					messageIndex={item.index}
+					columnIndex={0}
+					{renderMarkdown}
+					{filePath}
+					{transcriptId}
+					onCopy={(action) => handleCopy(action)}
+					comments={getCommentsForMessage(item.message, item.index)}
+					highlights={getHighlightsForMessage(item.message, item.index)}
+					{onAddComment}
+					{onDeleteComment}
+					{onAddHighlight}
+					{onOpenCommentModal}
+					{toolResultMap}
+					{isCompact}
+					actorLabel={getActorLabel(item.message)}
+				/>
 			{/if}
 		{/each}
 	</div>

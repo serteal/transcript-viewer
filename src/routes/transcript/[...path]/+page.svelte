@@ -727,13 +727,22 @@ import FilterDropdown from '$lib/client/components/FilterDropdown.svelte';
 	// Reference to SingleColumnLayout for branch switching
 	let singleColumnLayoutRef: {
 		switchToBranchContainingMessage: (messageId: string) => Promise<boolean>;
-		getBranchData: () => { sharedMessages: any[]; branchPoints: any[] };
-		getActiveBranches: () => Record<string, string>;
-		switchToBranch: (branchPointId: string, branchId: string) => void;
-		getBranchTree: () => any | null;
-		getActiveTreeBranchId: () => string;
-		switchToTreeBranch: (branchId: string) => void;
 	} | null = $state(null);
+
+	// Active branch state — managed at page level, shared across all tabs
+	let activeTreeBranchId = $state('');
+
+	// Initialize to first baseline when tree is available
+	$effect(() => {
+		if (globalBranchTree && globalBranchTree.allBranches.length > 0 && !activeTreeBranchId) {
+			const firstBaseline = globalBranchTree.allBranches.find(b => b.isBaseline);
+			activeTreeBranchId = firstBaseline?.id || globalBranchTree.allBranches[0].id;
+		}
+	});
+
+	function handleTreeBranchChange(branchId: string) {
+		activeTreeBranchId = branchId;
+	}
 
 	// Reading progress bar state
 	let scrollProgress = $state(0);
@@ -746,46 +755,11 @@ import FilterDropdown from '$lib/client/components/FilterDropdown.svelte';
 		}
 	}
 
-	// Derived branch data for sidebar
-	const sidebarBranches = $derived.by(() => {
-		if (!singleColumnLayoutRef) return [];
-		const branchData = singleColumnLayoutRef.getBranchData();
-		if (branchData.branchPoints.length === 0) return [];
-		// Get branches from the first branch point
-		const bp = branchData.branchPoints[0];
-		return bp.branches.map((b: any) => ({
-			id: b.id,
-			label: b.label,
-			name: b.name,
-			messageCount: b.messageCount
-		}));
-	});
-
-	const activeBranchId = $derived.by(() => {
-		if (!singleColumnLayoutRef) return undefined;
-		const activeBranches = singleColumnLayoutRef.getActiveBranches();
-		// Get the active branch for the first branch point
-		return activeBranches['branch-0'];
-	});
-
-	// Branch tree for sidebar — always from combined view, shared across all tabs
+	// Sidebar branch tree — always from combined view
 	const sidebarBranchTree = $derived(globalBranchTree);
 
-	const sidebarActiveTreeBranchId = $derived.by(() => {
-		if (!singleColumnLayoutRef) return '';
-		return singleColumnLayoutRef.getActiveTreeBranchId();
-	});
-
-	function handleTreeBranchSelect(branchId: string) {
-		if (singleColumnLayoutRef) {
-			singleColumnLayoutRef.switchToTreeBranch(branchId);
-		}
-	}
-
 	function handleSidebarBranchSelect(branchId: string) {
-		if (singleColumnLayoutRef) {
-			singleColumnLayoutRef.switchToBranch('branch-0', branchId);
-		}
+		handleTreeBranchChange(branchId);
 	}
 
 	// Scroll to a comment's message, switching branches if needed, and mark as read
@@ -1456,7 +1430,7 @@ import FilterDropdown from '$lib/client/components/FilterDropdown.svelte';
 			<pre class="raw-data">{JSON.stringify(transcript, null, 2)}</pre>
 		{:else}
 			<section class="viewer-section">
-				<SingleColumnLayout bind:this={singleColumnLayoutRef} columns={columns} transcriptEvents={transcript.events} showShared={settings.value.showSharedHistory} renderMarkdown={settings.value.renderMarkdown} fullWidth={settings.value.fullWidth} filePath={absolutePath} transcriptId={meta.transcript_id} on:ready={stopColumnsLoading} comments={userComments} highlights={userHighlights} onAddComment={handleAddComment} onDeleteComment={handleDeleteComment} onAddHighlight={handleAddHighlight} onOpenCommentModal={openCommentModal} messageFilter={activeFilters.length > 0 ? messageMatchesFilters : undefined} isCompact={settings.value.compactToolCalls} {toolTypeFilter} auditorModel={meta.auditor_model} targetModel={meta.target_model} externalBranchTree={globalBranchTree} />
+				<SingleColumnLayout bind:this={singleColumnLayoutRef} columns={columns} transcriptEvents={transcript.events} showShared={settings.value.showSharedHistory} renderMarkdown={settings.value.renderMarkdown} fullWidth={settings.value.fullWidth} filePath={absolutePath} transcriptId={meta.transcript_id} on:ready={stopColumnsLoading} comments={userComments} highlights={userHighlights} onAddComment={handleAddComment} onDeleteComment={handleDeleteComment} onAddHighlight={handleAddHighlight} onOpenCommentModal={openCommentModal} messageFilter={activeFilters.length > 0 ? messageMatchesFilters : undefined} isCompact={settings.value.compactToolCalls} {toolTypeFilter} auditorModel={meta.auditor_model} targetModel={meta.target_model} {globalBranchTree} {activeTreeBranchId} onTreeBranchChange={handleTreeBranchChange} />
 				{#if showColumnsSpinner}
 					<div class="columns-overlay" aria-live="polite" aria-busy={columnsLoading}>
 						<div class="spinner"></div>
@@ -1481,12 +1455,9 @@ import FilterDropdown from '$lib/client/components/FilterDropdown.svelte';
 			startTime={createdAt.toLocaleString()}
 			endTime={updatedAt.toLocaleString()}
 			duration={(() => { const ms = Math.max(0, updatedAt.getTime() - createdAt.getTime()); const s=Math.floor(ms/1000); const h=Math.floor(s/3600); const m=Math.floor((s%3600)/60); const r=s%60; return h>0?`${h}h ${m}m ${r}s`:m>0?`${m}m ${r}s`:`${r}s`; })()}
-			branches={sidebarBranches}
-			activeBranchId={activeBranchId}
-			onBranchSelect={handleSidebarBranchSelect}
 			branchTree={sidebarBranchTree}
-			activeSegmentId={sidebarActiveTreeBranchId}
-			onSegmentSelect={handleTreeBranchSelect}
+			activeSegmentId={activeTreeBranchId}
+			onSegmentSelect={handleSidebarBranchSelect}
 			onClose={() => sidebarOpen.value = { open: false }}
 			onCommentClick={scrollToComment}
 			onHighlightClick={(index) => navigateToHighlight(index)}
