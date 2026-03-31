@@ -1,51 +1,51 @@
 import type { MessageWithMetadata } from '$lib/shared/types';
 
 /**
- * A segment of messages that forms one branch in the audit tree.
+ * A checkpoint node in the branch tree.
+ * Each checkpoint can have multiple branches (the baseline continuation + restores).
  */
-export interface BranchSegment {
+export interface CheckpointNode {
+	/** Checkpoint label */
+	label: string;
+	/** Index in the full message list where create_checkpoint was called */
+	messageIndex: number;
+}
+
+/**
+ * A branch (leaf) under a checkpoint.
+ * Represents a contiguous run of messages from a checkpoint fork point.
+ */
+export interface BranchLeaf {
 	/** Unique identifier */
 	id: string;
-	/** Human-readable label (e.g., "Baseline", "Pressure Branch") */
+	/** Human-readable label */
 	label: string;
-	/** Checkpoint label this segment was restored from (null = trunk/root) */
-	parentCheckpoint: string | null;
-	/** Index in the full linear message list where this segment starts */
+	/** Whether this is the baseline (original continuation) or a restore branch */
+	isBaseline: boolean;
+	/** The checkpoint this branches from */
+	checkpoint: CheckpointNode;
+	/** Start index in the full message list (inclusive) */
 	startIndex: number;
-	/** Index in the full linear message list where this segment ends (exclusive) */
+	/** End index in the full message list (exclusive) */
 	endIndex: number;
-	/** Messages in this segment (NOT including shared prefix) */
+	/** Messages in this branch */
 	messages: MessageWithMetadata[];
-	/** Number of send_message tool calls in this segment */
+	/** Number of send_message tool calls */
 	sendMessageCount: number;
 }
 
 /**
- * A checkpoint defined by create_checkpoint in the message list.
- */
-export interface CheckpointNode {
-	/** The checkpoint label */
-	label: string;
-	/** Index in the full linear message list */
-	messageIndex: number;
-	/** Which segment this checkpoint belongs to */
-	segmentId: string;
-}
-
-/**
- * The full branch tree parsed from the combined view.
+ * The full branch tree.
  */
 export interface BranchTree {
-	/** Messages shared across all branches (before the first checkpoint that gets restored) */
+	/** Messages before the first checkpoint (setup/environment exploration) */
 	sharedPrefix: MessageWithMetadata[];
-	/** Index of the first fork point in the original message list */
-	firstForkIndex: number;
-	/** All segments (branches) in order */
-	segments: BranchSegment[];
-	/** All checkpoints */
+	/** Ordered list of checkpoints */
 	checkpoints: CheckpointNode[];
-	/** Map from checkpoint label to the segments that fork from it */
-	forkMap: Map<string, string[]>;
+	/** All branches grouped by checkpoint label */
+	branchesByCheckpoint: Map<string, BranchLeaf[]>;
+	/** Flat list of all branch leaves for easy iteration */
+	allBranches: BranchLeaf[];
 }
 
 /**
@@ -65,12 +65,12 @@ export function hasBranchingPattern(messages: MessageWithMetadata[]): boolean {
 /**
  * Parse a linear combined-view message list into a branch tree.
  *
- * The algorithm:
- * 1. Scan for create_checkpoint calls → record label → index
- * 2. Scan for restore_checkpoint calls → these split the list into segments
- * 3. Each segment after a restore forks from the checkpoint it restored to
- * 4. The "trunk" is everything before the first restore
- * 5. Compute the shared prefix = messages up to the earliest fork point
+ * Model:
+ * - Each checkpoint is a parent node
+ * - Under each checkpoint: the baseline continuation + any restore branches
+ * - The baseline from checkpoint C runs from C+1 until the first restore
+ *   that targets C (or the end of the list / next restore to any checkpoint)
+ * - Each restore_checkpoint(C) creates a new branch leaf from C
  */
 export function parseBranchTree(messages: MessageWithMetadata[]): BranchTree {
 	// Step 1: Find all checkpoints and restores
@@ -93,134 +93,180 @@ export function parseBranchTree(messages: MessageWithMetadata[]): BranchTree {
 		}
 	}
 
-	// No restores → no branching, return single segment
+	// No restores → no branching
 	if (restorePoints.length === 0) {
-		const segment: BranchSegment = {
-			id: 'trunk',
-			label: 'Main',
-			parentCheckpoint: null,
-			startIndex: 0,
-			endIndex: messages.length,
-			messages: [...messages],
-			sendMessageCount: countSendMessages(messages),
-		};
+		const checkpoints = Array.from(checkpointMap.entries())
+			.sort((a, b) => a[1] - b[1])
+			.map(([label, idx]) => ({ label, messageIndex: idx }));
+
 		return {
-			sharedPrefix: [],
-			firstForkIndex: messages.length,
-			segments: [segment],
-			checkpoints: Array.from(checkpointMap.entries()).map(([label, idx]) => ({
-				label,
-				messageIndex: idx,
-				segmentId: 'trunk',
-			})),
-			forkMap: new Map(),
+			sharedPrefix: [...messages],
+			checkpoints,
+			branchesByCheckpoint: new Map(),
+			allBranches: [],
 		};
 	}
 
-	// Step 2: Determine the shared prefix
-	// The earliest checkpoint that gets restored determines where branching starts
-	const restoredCheckpoints = new Set(restorePoints.map(r => r.checkpointLabel));
-	let earliestForkIndex = messages.length;
+	// Step 2: Build restore boundaries — sorted by index
+	const sortedRestores = [...restorePoints].sort((a, b) => a.index - b.index);
+
+	// Step 3: Determine shared prefix (before the first checkpoint that gets restored)
+	const restoredLabels = new Set(restorePoints.map(r => r.checkpointLabel));
+	let firstRestoredCpIndex = messages.length;
 	for (const [label, idx] of checkpointMap) {
-		if (restoredCheckpoints.has(label)) {
-			earliestForkIndex = Math.min(earliestForkIndex, idx);
+		if (restoredLabels.has(label)) {
+			firstRestoredCpIndex = Math.min(firstRestoredCpIndex, idx);
 		}
 	}
+	const sharedPrefix = messages.slice(0, firstRestoredCpIndex + 1);
 
-	// Shared prefix = messages[0..earliestForkIndex] (inclusive of the checkpoint message)
-	const sharedPrefix = messages.slice(0, earliestForkIndex + 1);
-
-	// Step 3: Build segments
-	// Segment boundaries are at each restore_checkpoint call
-	const segments: BranchSegment[] = [];
-	const forkMap = new Map<string, string[]>();
-
-	// Trunk segment: from after shared prefix to the first restore
-	const firstRestoreIndex = restorePoints[0].index;
-	const trunkMessages = messages.slice(earliestForkIndex + 1, firstRestoreIndex);
-	const trunkId = 'branch-main';
-
-	// Find which checkpoint the trunk continues from
-	// The trunk continues from the earliest fork point
-	const trunkCheckpointLabel = Array.from(checkpointMap.entries())
-		.find(([_, idx]) => idx === earliestForkIndex)?.[0] || null;
-
-	segments.push({
-		id: trunkId,
-		label: 'Baseline',
-		parentCheckpoint: trunkCheckpointLabel,
-		startIndex: earliestForkIndex + 1,
-		endIndex: firstRestoreIndex,
-		messages: trunkMessages,
-		sendMessageCount: countSendMessages(trunkMessages),
-	});
-
-	if (trunkCheckpointLabel) {
-		forkMap.set(trunkCheckpointLabel, [trunkId]);
-	}
-
-	// Branch segments: between each restore and the next restore (or end)
-	for (let r = 0; r < restorePoints.length; r++) {
-		const restore = restorePoints[r];
-		const startIdx = restore.index; // include the restore message itself
-		const endIdx = r + 1 < restorePoints.length
-			? restorePoints[r + 1].index
-			: messages.length;
-
-		const branchMessages = messages.slice(startIdx, endIdx);
-		const branchId = `branch-${r + 1}`;
-		const branchLabel = inferBranchLabel(branchMessages, r + 1);
-
-		segments.push({
-			id: branchId,
-			label: branchLabel,
-			parentCheckpoint: restore.checkpointLabel,
-			startIndex: startIdx,
-			endIndex: endIdx,
-			messages: branchMessages,
-			sendMessageCount: countSendMessages(branchMessages),
-		});
-
-		const existing = forkMap.get(restore.checkpointLabel) || [];
-		existing.push(branchId);
-		forkMap.set(restore.checkpointLabel, existing);
-	}
-
-	// Step 4: Build checkpoint nodes
+	// Step 4: Build checkpoint nodes (only those that get restored)
 	const checkpoints: CheckpointNode[] = [];
 	for (const [label, idx] of checkpointMap) {
-		// Find which segment owns this checkpoint
-		let segmentId = 'shared';
-		if (idx <= earliestForkIndex) {
-			segmentId = 'shared';
-		} else {
-			for (const seg of segments) {
-				if (idx >= seg.startIndex && idx < seg.endIndex) {
-					segmentId = seg.id;
-					break;
-				}
+		if (restoredLabels.has(label)) {
+			checkpoints.push({ label, messageIndex: idx });
+		}
+	}
+	checkpoints.sort((a, b) => a.messageIndex - b.messageIndex);
+
+	// Step 5: For each checkpoint, find its branches
+	const branchesByCheckpoint = new Map<string, BranchLeaf[]>();
+	const allBranches: BranchLeaf[] = [];
+
+	// All restore indices as boundaries
+	const restoreIndices = sortedRestores.map(r => r.index);
+
+	for (const cp of checkpoints) {
+		const branches: BranchLeaf[] = [];
+
+		// Baseline branch: from cp+1 until the first restore (to ANY checkpoint) after cp
+		const baselineStart = cp.messageIndex + 1;
+		let baselineEnd = messages.length;
+		for (const ri of restoreIndices) {
+			if (ri > cp.messageIndex) {
+				baselineEnd = ri;
+				break;
 			}
 		}
-		checkpoints.push({ label, messageIndex: idx, segmentId });
+
+		if (baselineStart < baselineEnd) {
+			const baselineMsgs = messages.slice(baselineStart, baselineEnd);
+			const baselineLeaf: BranchLeaf = {
+				id: `${cp.label}:baseline`,
+				label: 'Baseline',
+				isBaseline: true,
+				checkpoint: cp,
+				startIndex: baselineStart,
+				endIndex: baselineEnd,
+				messages: baselineMsgs,
+				sendMessageCount: countSendMessages(baselineMsgs),
+			};
+			branches.push(baselineLeaf);
+			allBranches.push(baselineLeaf);
+		}
+
+		// Restore branches: each restore_checkpoint targeting this checkpoint
+		const cpRestores = sortedRestores.filter(r => r.checkpointLabel === cp.label);
+		for (let ri = 0; ri < cpRestores.length; ri++) {
+			const restore = cpRestores[ri];
+			const branchStart = restore.index;
+			// End at the next restore (to ANY checkpoint) or end of messages
+			let branchEnd = messages.length;
+			const globalRestoreIdx = restoreIndices.indexOf(restore.index);
+			if (globalRestoreIdx >= 0 && globalRestoreIdx + 1 < restoreIndices.length) {
+				branchEnd = restoreIndices[globalRestoreIdx + 1];
+			}
+
+			const branchMsgs = messages.slice(branchStart, branchEnd);
+			const branchLabel = inferBranchLabel(branchMsgs, ri + 1);
+			const branchLeaf: BranchLeaf = {
+				id: `${cp.label}:branch-${ri + 1}`,
+				label: branchLabel,
+				isBaseline: false,
+				checkpoint: cp,
+				startIndex: branchStart,
+				endIndex: branchEnd,
+				messages: branchMsgs,
+				sendMessageCount: countSendMessages(branchMsgs),
+			};
+			branches.push(branchLeaf);
+			allBranches.push(branchLeaf);
+		}
+
+		branchesByCheckpoint.set(cp.label, branches);
 	}
 
 	return {
 		sharedPrefix,
-		firstForkIndex: earliestForkIndex,
-		segments,
 		checkpoints,
-		forkMap,
+		branchesByCheckpoint,
+		allBranches,
 	};
 }
 
 /**
- * Infer a human-readable label for a branch by looking at
- * the auditor's reasoning in the restore message.
+ * Get the messages to display for a given active branch leaf.
+ * Returns: shared prefix + baseline chain up to the fork + branch messages.
+ */
+export function getMessagesForBranch(
+	tree: BranchTree,
+	branchId: string
+): { messages: MessageWithMetadata[]; forkIndex: number } {
+	const branch = tree.allBranches.find(b => b.id === branchId);
+	if (!branch) {
+		return { messages: [...tree.sharedPrefix], forkIndex: tree.sharedPrefix.length };
+	}
+
+	if (branch.isBaseline) {
+		// For a baseline branch, show shared prefix + this branch's messages
+		// But also include any parent baseline messages if this checkpoint is nested
+		const parentMessages = getBaselineChainTo(tree, branch.checkpoint);
+		return {
+			messages: [...tree.sharedPrefix, ...parentMessages, ...branch.messages],
+			forkIndex: tree.sharedPrefix.length + parentMessages.length,
+		};
+	} else {
+		// For a restore branch, show shared prefix + baseline chain up to checkpoint + branch
+		const parentMessages = getBaselineChainTo(tree, branch.checkpoint);
+		return {
+			messages: [...tree.sharedPrefix, ...parentMessages, ...branch.messages],
+			forkIndex: tree.sharedPrefix.length + parentMessages.length,
+		};
+	}
+}
+
+/**
+ * Get the baseline messages from the first checkpoint up to (but not including)
+ * the given checkpoint. This handles the nested checkpoint case:
+ * if cp2 is inside cp1's baseline, we need cp1's baseline messages up to cp2.
+ */
+function getBaselineChainTo(tree: BranchTree, targetCp: CheckpointNode): MessageWithMetadata[] {
+	const result: MessageWithMetadata[] = [];
+
+	// Walk through checkpoints in order, collecting baseline messages
+	// that fall between the shared prefix and the target checkpoint
+	for (const cp of tree.checkpoints) {
+		if (cp.messageIndex >= targetCp.messageIndex) break;
+
+		const branches = tree.branchesByCheckpoint.get(cp.label);
+		const baseline = branches?.find(b => b.isBaseline);
+		if (baseline) {
+			// Include baseline messages up to target checkpoint (or end of baseline)
+			const endAt = Math.min(baseline.endIndex, targetCp.messageIndex + 1);
+			const slice = baseline.messages.slice(0, endAt - baseline.startIndex);
+			result.push(...slice);
+		}
+	}
+
+	return result;
+}
+
+/**
+ * Infer a human-readable label for a branch.
  */
 function inferBranchLabel(messages: MessageWithMetadata[], index: number): string {
 	if (messages.length === 0) return `Branch ${index}`;
 
-	// Check the first message (the restore call) for reasoning
 	const first = messages[0] as any;
 	const content = typeof first.content === 'string'
 		? first.content
@@ -228,10 +274,9 @@ function inferBranchLabel(messages: MessageWithMetadata[], index: number): strin
 			? first.content.find((c: any) => c?.type === 'text')?.text || ''
 			: '';
 
-	// Look for keywords in the reasoning
 	const lower = content.toLowerCase();
 	if (lower.includes('pressure') || lower.includes('escalat')) return `Pressure ${index}`;
-	if (lower.includes('verif') || lower.includes('confirm') || lower.includes('final state')) return `Verification`;
+	if (lower.includes('verif') || lower.includes('confirm') || lower.includes('final state')) return 'Verification';
 	if (lower.includes('different approach') || lower.includes('alternative')) return `Alternative ${index}`;
 	if (lower.includes('replay')) return `Replay ${index}`;
 
@@ -246,55 +291,4 @@ function countSendMessages(messages: MessageWithMetadata[]): number {
 		}
 	}
 	return count;
-}
-
-/**
- * Get the messages to display for a given active segment,
- * including the shared prefix and the segment's own messages.
- */
-export function getMessagesForSegment(
-	tree: BranchTree,
-	segmentId: string
-): { messages: MessageWithMetadata[]; forkIndex: number } {
-	const segment = tree.segments.find(s => s.id === segmentId);
-	if (!segment) {
-		return { messages: [...tree.sharedPrefix], forkIndex: tree.sharedPrefix.length };
-	}
-
-	// If this segment forks from a checkpoint that's in the shared prefix,
-	// just show shared prefix + segment messages
-	const checkpointIdx = segment.parentCheckpoint
-		? (tree.checkpoints.find(c => c.label === segment.parentCheckpoint)?.messageIndex ?? -1)
-		: -1;
-
-	if (checkpointIdx >= 0 && checkpointIdx <= tree.firstForkIndex) {
-		// Forks from shared prefix — show prefix + segment messages
-		return {
-			messages: [...tree.sharedPrefix, ...segment.messages],
-			forkIndex: tree.sharedPrefix.length,
-		};
-	}
-
-	// Forks from a checkpoint inside another segment — need to include
-	// the parent segment's messages up to that checkpoint too
-	if (checkpointIdx >= 0) {
-		const parentSegment = tree.segments.find(s =>
-			checkpointIdx >= s.startIndex && checkpointIdx < s.endIndex
-		);
-		if (parentSegment) {
-			const parentMessages = parentSegment.messages.slice(
-				0,
-				checkpointIdx - parentSegment.startIndex + 1
-			);
-			return {
-				messages: [...tree.sharedPrefix, ...parentMessages, ...segment.messages],
-				forkIndex: tree.sharedPrefix.length + parentMessages.length,
-			};
-		}
-	}
-
-	return {
-		messages: [...tree.sharedPrefix, ...segment.messages],
-		forkIndex: tree.sharedPrefix.length,
-	};
 }
