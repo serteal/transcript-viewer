@@ -3,8 +3,10 @@
 	import { onMount } from 'svelte';
 	import { browser } from '$app/environment';
 	import type { UserComment, UserHighlight } from '$lib/shared/types';
+	import type { BranchTree } from '$lib/client/utils/branch-tree';
 	import SidebarCommentCard from './SidebarCommentCard.svelte';
 	import SidebarHighlightCard from './SidebarHighlightCard.svelte';
+	import BranchTreeNav from './BranchTreeNav.svelte';
 
 	// Scroll to top function - fast but smooth
 	function scrollToTop() {
@@ -111,6 +113,10 @@
 		branches = [],
 		activeBranchId,
 		onBranchSelect,
+		// Branch tree props
+		branchTree,
+		activeSegmentId,
+		onSegmentSelect,
 		onClose,
 		onCommentClick,
 		onHighlightClick,
@@ -133,6 +139,10 @@
 		branches?: BranchInfo[];
 		activeBranchId?: string;
 		onBranchSelect?: (branchId: string) => void;
+		// Branch tree props
+		branchTree?: BranchTree | null;
+		activeSegmentId?: string;
+		onSegmentSelect?: (segmentId: string) => void;
 		onClose: () => void;
 		onCommentClick: (comment: UserComment) => void;
 		onHighlightClick: (index: number) => void;
@@ -247,8 +257,35 @@
 			{/if}
 		</section>
 
-		<!-- Branches Section (only show if multiple branches) -->
-		{#if branches.length > 1}
+		<!-- Branch Tree Section (checkpoint/restore pattern) -->
+		{#if branchTree && branchTree.segments.length > 1}
+			<section class="sidebar-section">
+				<button
+					type="button"
+					class="section-header"
+					onclick={() => branchesExpanded = !branchesExpanded}
+					aria-expanded={branchesExpanded}
+				>
+					{#if branchesExpanded}
+						<ChevronDown size={16} />
+					{:else}
+						<ChevronRight size={16} />
+					{/if}
+					<span class="section-title">Branches ({branchTree.segments.length})</span>
+				</button>
+
+				{#if branchesExpanded}
+					<div class="section-content">
+						<BranchTreeNav
+							tree={branchTree}
+							activeSegmentId={activeSegmentId || branchTree.segments[0]?.id || ''}
+							onSegmentSelect={(id) => onSegmentSelect?.(id)}
+						/>
+					</div>
+				{/if}
+			</section>
+		<!-- Snapshot Branches Section (fallback for target view) -->
+		{:else if branches.length > 1}
 			<section class="sidebar-section">
 				<button
 					type="button"
