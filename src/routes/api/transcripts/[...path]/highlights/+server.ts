@@ -6,13 +6,15 @@
 
 import { json, error, type RequestHandler } from '@sveltejs/kit';
 import { join } from 'node:path';
-import { readFile, writeFile } from 'node:fs/promises';
 import { getGlobalConfig } from '$lib/server/config/app-config';
 import { getGlobalCache } from '$lib/server/cache/transcript-cache';
 import { extractMetadata } from '$lib/shared/utils/transcript-utils';
+import { openTranscriptFile } from '$lib/server/loaders/transcript-file-io';
+import { validateLenient } from '$lib/shared/validation/transcript-validator';
+import { assertAccess } from '$lib/server/access';
 import type { UserHighlight } from '$lib/shared/types';
 
-export const POST: RequestHandler = async ({ params, request }) => {
+export const POST: RequestHandler = async ({ params, request, locals }) => {
 	try {
 		const config = getGlobalConfig();
 		const filePath = params.path;
@@ -29,6 +31,9 @@ export const POST: RequestHandler = async ({ params, request }) => {
 			throw error(400, 'Invalid file path');
 		}
 
+		// Access control
+		assertAccess(locals.username, decodedPath);
+
 		const fullPath = join(config.transcriptRootDir, decodedPath);
 
 		// Parse request body
@@ -38,13 +43,12 @@ export const POST: RequestHandler = async ({ params, request }) => {
 			throw error(400, 'message_id, quoted_text, and description are required');
 		}
 
-		// Read current transcript
-		const content = await readFile(fullPath, 'utf-8');
-		const transcript = JSON.parse(content);
+		// Read current transcript (format-aware)
+		const file = await openTranscriptFile(fullPath);
 
 		// Initialize highlights array if needed
-		if (!transcript.metadata.user_highlights) {
-			transcript.metadata.user_highlights = [];
+		if (!file.get('user_highlights')) {
+			file.set('user_highlights', []);
 		}
 
 		// Create new highlight
@@ -58,18 +62,19 @@ export const POST: RequestHandler = async ({ params, request }) => {
 			created_at: new Date().toISOString()
 		};
 
-		transcript.metadata.user_highlights.push(newHighlight);
+		file.get('user_highlights').push(newHighlight);
 
 		// Write back to disk
-		await writeFile(fullPath, JSON.stringify(transcript, null, 2));
+		await file.save(fullPath);
 
-		// Update cache with new metadata instead of removing
+		// Update cache
 		const cache = getGlobalCache({
 			fullTranscriptCacheSize: config.cache.fullTranscriptCacheSize,
 			enableWatching: config.cache.enableWatching,
 			watchDirectory: config.transcriptRootDir
 		});
-		const updatedMetadata = extractMetadata(transcript, decodedPath);
+		const normalized = validateLenient(file.raw, decodedPath);
+		const updatedMetadata = extractMetadata(normalized, decodedPath);
 		cache.updateTranscriptMetadata(updatedMetadata);
 		cache.invalidateFullTranscript(decodedPath);
 
@@ -84,7 +89,7 @@ export const POST: RequestHandler = async ({ params, request }) => {
 	}
 };
 
-export const DELETE: RequestHandler = async ({ params, request }) => {
+export const DELETE: RequestHandler = async ({ params, request, locals }) => {
 	try {
 		const config = getGlobalConfig();
 		const filePath = params.path;
@@ -99,6 +104,8 @@ export const DELETE: RequestHandler = async ({ params, request }) => {
 			throw error(400, 'Invalid file path');
 		}
 
+		assertAccess(locals.username, decodedPath);
+
 		const fullPath = join(config.transcriptRootDir, decodedPath);
 
 		// Parse request body
@@ -108,34 +115,35 @@ export const DELETE: RequestHandler = async ({ params, request }) => {
 			throw error(400, 'highlight_id is required');
 		}
 
-		// Read current transcript
-		const content = await readFile(fullPath, 'utf-8');
-		const transcript = JSON.parse(content);
+		// Read current transcript (format-aware)
+		const file = await openTranscriptFile(fullPath);
 
 		// Find and remove highlight
-		if (!transcript.metadata.user_highlights) {
+		const highlights = file.get('user_highlights');
+		if (!highlights) {
 			throw error(404, 'Highlight not found');
 		}
 
-		const initialLength = transcript.metadata.user_highlights.length;
-		transcript.metadata.user_highlights = transcript.metadata.user_highlights.filter(
-			(h: UserHighlight) => h.id !== highlight_id
-		);
+		const initialLength = highlights.length;
+		const filtered = highlights.filter((h: UserHighlight) => h.id !== highlight_id);
 
-		if (transcript.metadata.user_highlights.length === initialLength) {
+		if (filtered.length === initialLength) {
 			throw error(404, 'Highlight not found');
 		}
+
+		file.set('user_highlights', filtered);
 
 		// Write back to disk
-		await writeFile(fullPath, JSON.stringify(transcript, null, 2));
+		await file.save(fullPath);
 
-		// Update cache with new metadata instead of removing
+		// Update cache
 		const cache = getGlobalCache({
 			fullTranscriptCacheSize: config.cache.fullTranscriptCacheSize,
 			enableWatching: config.cache.enableWatching,
 			watchDirectory: config.transcriptRootDir
 		});
-		const updatedMetadata = extractMetadata(transcript, decodedPath);
+		const normalized = validateLenient(file.raw, decodedPath);
+		const updatedMetadata = extractMetadata(normalized, decodedPath);
 		cache.updateTranscriptMetadata(updatedMetadata);
 		cache.invalidateFullTranscript(decodedPath);
 

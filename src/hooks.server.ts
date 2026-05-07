@@ -1,7 +1,7 @@
 import type { Handle } from '@sveltejs/kit';
 import { redirect } from '@sveltejs/kit';
 import { base } from '$app/paths';
-import { validateSession, isAuthEnabled, SESSION_COOKIE } from '$lib/server/auth';
+import { getSessionUser, isAuthEnabled, SESSION_COOKIE } from '$lib/server/auth';
 
 /** Paths that are always accessible (no auth required) */
 const PUBLIC_PATHS = () => [`${base}/login`];
@@ -30,9 +30,11 @@ export const handle: Handle = async ({ event, resolve }) => {
 		return resolve(event);
 	}
 
-	// Check for valid session
+	// Check for valid session and resolve username
 	const sessionId = event.cookies.get(SESSION_COOKIE);
-	if (!sessionId || !validateSession(sessionId)) {
+	const username = sessionId ? getSessionUser(sessionId) : null;
+
+	if (!username) {
 		// API routes get 401
 		if (pathname.startsWith(`${base}/api/`)) {
 			return new Response(JSON.stringify({ error: 'Unauthorized' }), {
@@ -43,6 +45,9 @@ export const handle: Handle = async ({ event, resolve }) => {
 		// Everything else redirects to login
 		throw redirect(303, `${base}/login`);
 	}
+
+	// Attach username to request locals for downstream access checks
+	event.locals.username = username;
 
 	// Resolve the request
 	const response = await resolve(event);

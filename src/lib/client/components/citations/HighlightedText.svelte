@@ -31,6 +31,45 @@
     return findCitationsForMessage(message.id, textToProcess, lookup, true);
   });
 
+  /**
+   * Find quoted_text in textToProcess with whitespace normalization fallback.
+   * Returns { start, end } in the ORIGINAL text, or null if not found.
+   */
+  function fuzzyIndexOf(haystack: string, needle: string): { start: number; end: number } | null {
+    // Try exact match first
+    const exact = haystack.indexOf(needle);
+    if (exact !== -1) return { start: exact, end: exact + needle.length };
+
+    // Normalize whitespace: collapse all runs of whitespace to single space
+    const normalizeWs = (s: string) => s.replace(/\s+/g, ' ');
+    const normNeedle = normalizeWs(needle);
+    const normHaystack = normalizeWs(haystack);
+    const normIdx = normHaystack.indexOf(normNeedle);
+    if (normIdx === -1) return null;
+
+    // Map normalized position back to original text
+    // Walk through original text counting normalized chars
+    let normPos = 0;
+    let origStart = -1;
+    let origEnd = -1;
+    let i = 0;
+    while (i < haystack.length && normPos <= normIdx + normNeedle.length) {
+      if (normPos === normIdx) origStart = i;
+      if (normPos === normIdx + normNeedle.length) { origEnd = i; break; }
+      if (/\s/.test(haystack[i])) {
+        // Skip whitespace run in original, counts as 1 in normalized
+        while (i < haystack.length - 1 && /\s/.test(haystack[i + 1])) i++;
+        normPos++;
+      } else {
+        normPos++;
+      }
+      i++;
+    }
+    if (origStart !== -1 && origEnd === -1) origEnd = haystack.length;
+    if (origStart === -1) return null;
+    return { start: origStart, end: origEnd };
+  }
+
   // Create highlighted text parts - handles overlapping citations and comments properly
   const highlightedParts = $derived.by(() => {
     if (!textToProcess) {
@@ -55,12 +94,12 @@
     for (const citation of messageCitations) {
       for (const part of citation.parts || []) {
         if (part.message_id === message.id && !part.tool_call_id && part.quoted_text) {
-          const index = textToProcess.indexOf(part.quoted_text);
-          if (index !== -1) {
+          const match = fuzzyIndexOf(textToProcess, part.quoted_text);
+          if (match) {
             allHighlights.push({
-              text: part.quoted_text,
-              start: index,
-              end: index + part.quoted_text.length,
+              text: textToProcess.slice(match.start, match.end),
+              start: match.start,
+              end: match.end,
               highlightType: 'citation',
               citation,
               citationIndex: citation.index || undefined

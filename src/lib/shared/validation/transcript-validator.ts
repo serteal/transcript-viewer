@@ -7,6 +7,7 @@ import Ajv from 'ajv';
 import addFormats from 'ajv-formats';
 import type { Transcript } from '../types';
 import transcriptSchema from './transcript-schema.json';
+import { isNewFormat, normalizeTranscript } from '../utils/normalize-transcript';
 
 // Initialize AJV with formats - configure for flexible validation
 const ajv = new Ajv({ 
@@ -111,18 +112,24 @@ export function validateLenient(data: any, filePath?: string): Transcript {
 	if (!data || typeof data !== 'object') {
 		throw new Error(`Invalid transcript: not an object`);
 	}
-	
+
+	// Detect and normalize new-format transcripts
+	if (isNewFormat(data)) {
+		if (filePath) console.log(`🔄 [VALIDATION] Normalizing new-format transcript: ${filePath}`);
+		return normalizeTranscript(data);
+	}
+
 	if (!data.metadata || typeof data.metadata !== 'object') {
 		throw new Error(`Invalid transcript: missing or invalid metadata`);
 	}
-	
+
 	if (!data.metadata.transcript_id) {
 		throw new Error(`Invalid transcript: missing transcript_id`);
 	}
-	
+
 	// Migrate deprecated description field
 	migrateDescriptionToSeedInstruction(data);
-	
+
 	// Log detailed validation for debugging if full validation fails
 	const result = validate(data);
 	if (!result.valid && filePath) {
@@ -132,7 +139,7 @@ export function validateLenient(data: any, filePath?: string): Transcript {
 			console.log(`   First errors: ${result.errors.slice(0, 3).map(e => `${e.path}: ${e.message}`).join('; ')}`);
 		}
 	}
-	
+
 	// Accept the data even if it fails strict validation
 	return data as Transcript;
 }

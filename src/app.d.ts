@@ -3,7 +3,10 @@
 declare global {
 	namespace App {
 		// interface Error {}
-		// interface Locals {}
+		interface Locals {
+			/** Authenticated username, set by hooks.server.ts */
+			username?: string;
+		}
 		// interface PageData {}
 		// interface PageState {}
 		// interface Platform {}

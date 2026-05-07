@@ -7,48 +7,57 @@
 
 import { json, error, type RequestHandler } from '@sveltejs/kit';
 import { join } from 'node:path';
-import { readFile, writeFile } from 'node:fs/promises';
 import { getGlobalConfig } from '$lib/server/config/app-config';
 import { getGlobalCache } from '$lib/server/cache/transcript-cache';
 import { extractMetadata } from '$lib/shared/utils/transcript-utils';
+import { openTranscriptFile } from '$lib/server/loaders/transcript-file-io';
+import { validateLenient } from '$lib/shared/validation/transcript-validator';
+import { assertAccess } from '$lib/server/access';
 import type { UserComment } from '$lib/shared/types';
 
-export const POST: RequestHandler = async ({ params, request }) => {
+function getCache() {
+	const config = getGlobalConfig();
+	return getGlobalCache({
+		fullTranscriptCacheSize: config.cache.fullTranscriptCacheSize,
+		enableWatching: config.cache.enableWatching,
+		watchDirectory: config.transcriptRootDir
+	});
+}
+
+function validatePath(filePath: string | undefined) {
+	if (!filePath) throw error(400, 'File path is required');
+	const decoded = decodeURIComponent(filePath);
+	if (decoded.includes('..') || decoded.startsWith('/')) throw error(400, 'Invalid file path');
+	return decoded;
+}
+
+async function updateCache(file: any, decodedPath: string) {
+	const cache = getCache();
+	const normalized = validateLenient(file.raw, decodedPath);
+	const updatedMetadata = extractMetadata(normalized, decodedPath);
+	cache.updateTranscriptMetadata(updatedMetadata);
+	cache.invalidateFullTranscript(decodedPath);
+}
+
+export const POST: RequestHandler = async ({ params, request, locals }) => {
 	try {
 		const config = getGlobalConfig();
-		const filePath = params.path;
-
-		if (!filePath) {
-			throw error(400, 'File path is required');
-		}
-
-		// Decode and validate the file path
-		const decodedPath = decodeURIComponent(filePath);
-
-		// Security check
-		if (decodedPath.includes('..') || decodedPath.startsWith('/')) {
-			throw error(400, 'Invalid file path');
-		}
-
+		const decodedPath = validatePath(params.path);
+		assertAccess(locals.username, decodedPath);
 		const fullPath = join(config.transcriptRootDir, decodedPath);
 
-		// Parse request body
 		const { message_id, text, author, quoted_text, parent_id } = await request.json();
 
 		if (!message_id || !text) {
 			throw error(400, 'message_id and text are required');
 		}
 
-		// Read current transcript
-		const content = await readFile(fullPath, 'utf-8');
-		const transcript = JSON.parse(content);
+		const file = await openTranscriptFile(fullPath);
 
-		// Initialize comments array if needed
-		if (!transcript.metadata.user_comments) {
-			transcript.metadata.user_comments = [];
+		if (!file.get('user_comments')) {
+			file.set('user_comments', []);
 		}
 
-		// Create new comment (author is auto-added to viewed_by so their own comment isn't "new" for them)
 		const newComment: UserComment = {
 			id: crypto.randomUUID(),
 			message_id,
@@ -60,167 +69,85 @@ export const POST: RequestHandler = async ({ params, request }) => {
 			parent_id: parent_id || undefined
 		};
 
-		transcript.metadata.user_comments.push(newComment);
-
-		// Write back to disk
-		await writeFile(fullPath, JSON.stringify(transcript, null, 2));
-
-		// Update cache with new metadata instead of removing
-		const cache = getGlobalCache({
-			fullTranscriptCacheSize: config.cache.fullTranscriptCacheSize,
-			enableWatching: config.cache.enableWatching,
-			watchDirectory: config.transcriptRootDir
-		});
-		const updatedMetadata = extractMetadata(transcript, decodedPath);
-		cache.updateTranscriptMetadata(updatedMetadata);
-		cache.invalidateFullTranscript(decodedPath);
+		file.get('user_comments').push(newComment);
+		await file.save(fullPath);
+		await updateCache(file, decodedPath);
 
 		return json({ success: true, comment: newComment });
 	} catch (err) {
-		if (err && typeof err === 'object' && 'status' in err) {
-			throw err;
-		}
-
+		if (err && typeof err === 'object' && 'status' in err) throw err;
 		console.error('❌ Comment POST error:', err);
 		throw error(500, 'Failed to add comment: ' + (err instanceof Error ? err.message : 'Unknown error'));
 	}
 };
 
-export const PATCH: RequestHandler = async ({ params, request }) => {
+export const PATCH: RequestHandler = async ({ params, request, locals }) => {
 	try {
 		const config = getGlobalConfig();
-		const filePath = params.path;
-
-		if (!filePath) {
-			throw error(400, 'File path is required');
-		}
-
-		const decodedPath = decodeURIComponent(filePath);
-
-		if (decodedPath.includes('..') || decodedPath.startsWith('/')) {
-			throw error(400, 'Invalid file path');
-		}
-
+		const decodedPath = validatePath(params.path);
+		assertAccess(locals.username, decodedPath);
 		const fullPath = join(config.transcriptRootDir, decodedPath);
 
-		// Parse request body
 		const { comment_id, username } = await request.json();
 
 		if (!comment_id || !username) {
 			throw error(400, 'comment_id and username are required');
 		}
 
-		// Read current transcript
-		const content = await readFile(fullPath, 'utf-8');
-		const transcript = JSON.parse(content);
+		const file = await openTranscriptFile(fullPath);
 
-		// Find the comment
-		if (!transcript.metadata.user_comments) {
-			throw error(404, 'Comment not found');
-		}
+		const comments = file.get('user_comments');
+		if (!comments) throw error(404, 'Comment not found');
 
-		const comment = transcript.metadata.user_comments.find(
-			(c: UserComment) => c.id === comment_id
-		);
+		const comment = comments.find((c: UserComment) => c.id === comment_id);
+		if (!comment) throw error(404, 'Comment not found');
 
-		if (!comment) {
-			throw error(404, 'Comment not found');
-		}
-
-		// Initialize viewed_by if needed and add username if not already present
-		if (!comment.viewed_by) {
-			comment.viewed_by = [];
-		}
+		if (!comment.viewed_by) comment.viewed_by = [];
 
 		if (!comment.viewed_by.includes(username)) {
 			comment.viewed_by.push(username);
-
-			// Write back to disk
-			await writeFile(fullPath, JSON.stringify(transcript, null, 2));
-
-			// Update cache
-			const cache = getGlobalCache({
-				fullTranscriptCacheSize: config.cache.fullTranscriptCacheSize,
-				enableWatching: config.cache.enableWatching,
-				watchDirectory: config.transcriptRootDir
-			});
-			const updatedMetadata = extractMetadata(transcript, decodedPath);
-			cache.updateTranscriptMetadata(updatedMetadata);
-			cache.invalidateFullTranscript(decodedPath);
+			await file.save(fullPath);
+			await updateCache(file, decodedPath);
 		}
 
 		return json({ success: true });
 	} catch (err) {
-		if (err && typeof err === 'object' && 'status' in err) {
-			throw err;
-		}
-
+		if (err && typeof err === 'object' && 'status' in err) throw err;
 		console.error('❌ Comment PATCH error:', err);
 		throw error(500, 'Failed to mark comment as read: ' + (err instanceof Error ? err.message : 'Unknown error'));
 	}
 };
 
-export const DELETE: RequestHandler = async ({ params, request }) => {
+export const DELETE: RequestHandler = async ({ params, request, locals }) => {
 	try {
 		const config = getGlobalConfig();
-		const filePath = params.path;
-
-		if (!filePath) {
-			throw error(400, 'File path is required');
-		}
-
-		const decodedPath = decodeURIComponent(filePath);
-
-		if (decodedPath.includes('..') || decodedPath.startsWith('/')) {
-			throw error(400, 'Invalid file path');
-		}
-
+		const decodedPath = validatePath(params.path);
+		assertAccess(locals.username, decodedPath);
 		const fullPath = join(config.transcriptRootDir, decodedPath);
 
-		// Parse request body
 		const { comment_id } = await request.json();
 
 		if (!comment_id) {
 			throw error(400, 'comment_id is required');
 		}
 
-		// Read current transcript
-		const content = await readFile(fullPath, 'utf-8');
-		const transcript = JSON.parse(content);
+		const file = await openTranscriptFile(fullPath);
 
-		// Find and remove comment
-		if (!transcript.metadata.user_comments) {
-			throw error(404, 'Comment not found');
-		}
+		const comments = file.get('user_comments');
+		if (!comments) throw error(404, 'Comment not found');
 
-		const initialLength = transcript.metadata.user_comments.length;
-		transcript.metadata.user_comments = transcript.metadata.user_comments.filter(
-			(c: UserComment) => c.id !== comment_id
-		);
+		const initialLength = comments.length;
+		const filtered = comments.filter((c: UserComment) => c.id !== comment_id);
 
-		if (transcript.metadata.user_comments.length === initialLength) {
-			throw error(404, 'Comment not found');
-		}
+		if (filtered.length === initialLength) throw error(404, 'Comment not found');
 
-		// Write back to disk
-		await writeFile(fullPath, JSON.stringify(transcript, null, 2));
-
-		// Update cache with new metadata instead of removing
-		const cache = getGlobalCache({
-			fullTranscriptCacheSize: config.cache.fullTranscriptCacheSize,
-			enableWatching: config.cache.enableWatching,
-			watchDirectory: config.transcriptRootDir
-		});
-		const updatedMetadata = extractMetadata(transcript, decodedPath);
-		cache.updateTranscriptMetadata(updatedMetadata);
-		cache.invalidateFullTranscript(decodedPath);
+		file.set('user_comments', filtered);
+		await file.save(fullPath);
+		await updateCache(file, decodedPath);
 
 		return json({ success: true });
 	} catch (err) {
-		if (err && typeof err === 'object' && 'status' in err) {
-			throw err;
-		}
-
+		if (err && typeof err === 'object' && 'status' in err) throw err;
 		console.error('❌ Comment DELETE error:', err);
 		throw error(500, 'Failed to delete comment: ' + (err instanceof Error ? err.message : 'Unknown error'));
 	}

@@ -8,18 +8,22 @@ import { join } from 'node:path';
 import { loadTranscript } from '$lib/server/loaders/transcript-loader';
 import { getGlobalCache } from '$lib/server/cache/transcript-cache';
 import { getGlobalConfig } from '$lib/server/config/app-config';
+import { assertAccess } from '$lib/server/access';
 
-export const GET: RequestHandler = async ({ params }) => {
+export const GET: RequestHandler = async ({ params, locals }) => {
 	try {
 		const config = getGlobalConfig();
 		const filePath = params.path;
-		
+
 		if (!filePath) {
 			throw error(400, 'File path is required');
 		}
-		
+
 		// Decode and validate the file path
 		const decodedPath = decodeURIComponent(filePath);
+
+		// Access control
+		assertAccess(locals.username, decodedPath);
 		
 		// Security check - ensure we stay within the transcript directory
 		if (decodedPath.includes('..') || decodedPath.startsWith('/')) {

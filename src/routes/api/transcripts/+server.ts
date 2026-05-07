@@ -7,8 +7,9 @@
 
 import { json, type RequestHandler } from '@sveltejs/kit';
 import { loadTranscriptMetadata, hasTranscriptMetadataChanged } from '$lib/server/services/transcript-metadata-service';
+import { filterTranscripts, filterFolderTree } from '$lib/server/access';
 
-export const GET: RequestHandler = async ({ url, request }) => {
+export const GET: RequestHandler = async ({ url, request, locals }) => {
 	try {
 		const subPath = url.searchParams.get('path') || '';
 		
@@ -24,6 +25,11 @@ export const GET: RequestHandler = async ({ url, request }) => {
 			includeETag: true 
 		});
 		
+		// Filter by user's allowed paths
+		data.transcripts = filterTranscripts(locals.username, data.transcripts);
+		data.folderTree = filterFolderTree(locals.username, data.folderTree);
+		data.count = data.transcripts.length;
+
 		// Remove currentPath from API response (only needed for SSR)
 		const { currentPath, ...response } = data;
 		

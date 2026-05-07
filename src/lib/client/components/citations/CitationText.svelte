@@ -12,7 +12,7 @@
   let { text, class: className = '' }: Props = $props();
 
   // Get citation context from parent - context is a reactive object
-  const citationContext = getContext<{ highlights: Citation[], columns: ConversationColumn[], currentView: string }>('citations');
+  const citationContext = getContext<{ highlights: Citation[], columns: ConversationColumn[], currentView: string, navigateToMessage?: (id: string) => void }>('citations');
   
   // Access highlights reactively
   const highlights = $derived(citationContext?.highlights || []);
@@ -44,13 +44,17 @@
       const citation = getCitationByIndex(index);
       if (citation && citation.parts?.[0]?.message_id) {
         const messageId = citation.parts[0].message_id;
-        const element = document.querySelector(`[data-message-id="${messageId}"]`);
-        if (element) {
-          element.scrollIntoView({ behavior: 'smooth', block: 'center' });
-          element.classList.add('citation-focus');
-          setTimeout(() => element.classList.remove('citation-focus'), 2000);
-          break;
+        if (citationContext?.navigateToMessage) {
+          citationContext.navigateToMessage(messageId);
+        } else {
+          const element = document.querySelector(`[data-message-id="${messageId}"]`);
+          if (element) {
+            element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            element.classList.add('citation-focus');
+            setTimeout(() => element.classList.remove('citation-focus'), 2000);
+          }
         }
+        break;
       }
     }
   }

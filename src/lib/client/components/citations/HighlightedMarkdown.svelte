@@ -118,11 +118,39 @@
     // Store event handlers for cleanup
     const eventHandlers: Array<{ element: Element, type: string, handler: EventListener }> = [];
 
+    // Fuzzy indexOf: normalize whitespace before matching, map back to original positions
+    function fuzzyIndexOf(haystack: string, needle: string): { start: number; end: number } | null {
+      const exact = haystack.indexOf(needle);
+      if (exact !== -1) return { start: exact, end: exact + needle.length };
+      const normWs = (s: string) => s.replace(/\s+/g, ' ');
+      const normNeedle = normWs(needle);
+      const normHaystack = normWs(haystack);
+      const normIdx = normHaystack.indexOf(normNeedle);
+      if (normIdx === -1) return null;
+      let normPos = 0, origStart = -1, origEnd = -1, i = 0;
+      while (i < haystack.length && normPos <= normIdx + normNeedle.length) {
+        if (normPos === normIdx) origStart = i;
+        if (normPos === normIdx + normNeedle.length) { origEnd = i; break; }
+        if (/\s/.test(haystack[i])) {
+          while (i < haystack.length - 1 && /\s/.test(haystack[i + 1])) i++;
+          normPos++;
+        } else {
+          normPos++;
+        }
+        i++;
+      }
+      if (origStart !== -1 && origEnd === -1) origEnd = haystack.length;
+      if (origStart === -1) return null;
+      return { start: origStart, end: origEnd };
+    }
+
     // For each highlight, find it and wrap it
     for (const highlight of allHighlightsToApply) {
       const { text: quotedText, highlightType, citation, commentId, highlightId } = highlight;
-      const index = fullText.indexOf(quotedText);
-      if (index === -1) continue;
+      const match = fuzzyIndexOf(fullText, quotedText);
+      if (!match) continue;
+      const index = match.start;
+      const matchLength = match.end - match.start;
 
       // Use TreeWalker to find text nodes
       const walker = document.createTreeWalker(containerDiv, NodeFilter.SHOW_TEXT, null);
@@ -137,7 +165,7 @@
         const nodeEnd = currentPos + nodeLength;
 
         const overlapStart = Math.max(index, nodeStart);
-        const overlapEnd = Math.min(index + quotedText.length, nodeEnd);
+        const overlapEnd = Math.min(index + matchLength, nodeEnd);
 
         if (overlapStart < overlapEnd) {
           nodesToHighlight.push({

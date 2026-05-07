@@ -245,6 +245,11 @@
 		openByKey[key] = openByKey[key] === false ? true : false;
 	}
 
+	/** Ensure a message is expanded (for citation navigation) */
+	export function expandMessage(messageId: string) {
+		openByKey[messageId] = true;
+	}
+
 	async function handleCopy(action: CopyAction) {
 		const result = await handleCopyAction(action, columns, transcriptEvents);
 		console.log(result.message);

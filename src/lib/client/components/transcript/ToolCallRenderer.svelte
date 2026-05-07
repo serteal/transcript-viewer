@@ -2,6 +2,8 @@
 	import type { ToolCall, MessageWithMetadata } from '$lib/shared/types';
 	import type { PairedToolResult } from '$lib/client/utils/tool-pairing';
 	import { categorizeToolCall, getCompactArgs, getCompactResult, type ToolCategory } from '$lib/client/utils/tool-pairing';
+	import { findCitationsForMessage, type CitationLookup } from '$lib/client/utils/citation-utils';
+	import { getContext } from 'svelte';
 	import HighlightedMarkdown from '$lib/client/components/citations/HighlightedMarkdown.svelte';
 	import HighlightedText from '$lib/client/components/citations/HighlightedText.svelte';
 
@@ -23,6 +25,23 @@
 		highlights?: any[];
 	} = $props();
 
+	// Synthetic message for citation lookup on tool results
+	const toolResultMessage = $derived.by((): MessageWithMetadata => {
+		if (result?.messageId) {
+			return { role: 'tool', id: result.messageId, content: result.content || '' } as any;
+		}
+		return message;
+	});
+
+	// Auto-expand tool results that have citations
+	const citationCtx = getContext<{ lookup: CitationLookup | null }>('citations');
+	const toolHasCitations = $derived.by(() => {
+		const lookup = citationCtx?.lookup;
+		if (!lookup || !result?.messageId) return false;
+		const content = result?.content || '';
+		return findCitationsForMessage(result.messageId, content, lookup, true).length > 0;
+	});
+
 	const category = $derived(categorizeToolCall(toolCall));
 	let collapsed = $state(false);
 	let resultExpanded = $state(false);
@@ -36,7 +55,7 @@
 		resultLines.length > MAX_RESULT_LINES || resultContent.length > MAX_RESULT_CHARS
 	);
 	const visibleResultContent = $derived(
-		isLongResult && !resultExpanded
+		isLongResult && !resultExpanded && !toolHasCitations
 			? resultLines.slice(0, MAX_RESULT_LINES).join('\n') +
 				(resultLines.length > MAX_RESULT_LINES ? '' : '')
 			: resultContent
@@ -396,23 +415,23 @@
 			</div>
 		{:else if category === 'terminal'}
 			<div class="tc-terminal-output">
-				<pre class="tc-terminal-stdout">{visibleResultContent}</pre>
+				<pre class="tc-terminal-stdout"><HighlightedText message={toolResultMessage} text={visibleResultContent} {comments} {highlights} /></pre>
 			</div>
 		{:else if category === 'file_read'}
 			<div class="tc-file-content">
-				<pre class="tc-pre tc-code-pre">{visibleResultContent}</pre>
+				<pre class="tc-pre tc-code-pre"><HighlightedText message={toolResultMessage} text={visibleResultContent} {comments} {highlights} /></pre>
 			</div>
 		{:else if category === 'file_list'}
 			<div class="tc-file-tree">
-				<pre class="tc-pre tc-tree-pre">{visibleResultContent}</pre>
+				<pre class="tc-pre tc-tree-pre"><HighlightedText message={toolResultMessage} text={visibleResultContent} {comments} {highlights} /></pre>
 			</div>
 		{:else if category === 'search'}
 			<div class="tc-search-results">
-				<pre class="tc-pre tc-code-pre">{visibleResultContent}</pre>
+				<pre class="tc-pre tc-code-pre"><HighlightedText message={toolResultMessage} text={visibleResultContent} {comments} {highlights} /></pre>
 			</div>
 		{:else}
 			<div class="tc-result-content">
-				<pre class="tc-pre">{visibleResultContent}</pre>
+				<pre class="tc-pre"><HighlightedText message={toolResultMessage} text={visibleResultContent} {comments} {highlights} /></pre>
 			</div>
 		{/if}
 

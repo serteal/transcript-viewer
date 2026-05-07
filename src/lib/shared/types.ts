@@ -301,6 +301,8 @@ export interface JudgeOutput {
 	scores: Record<string, number>;
 	score_descriptions?: Record<string, string> | null;
 	highlights?: Citation[] | null;
+	/** Per-source summaries (e.g. { scheming: "...", debug: "..." }) */
+	summaries?: Record<string, string> | null;
 }
 
 // User comment structure for message-level annotations

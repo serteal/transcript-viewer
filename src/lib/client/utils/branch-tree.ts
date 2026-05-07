@@ -336,3 +336,40 @@ function countSendMessages(messages: MessageWithMetadata[]): number {
 	}
 	return count;
 }
+
+/**
+ * Build a BranchTree from multiple conversation columns.
+ * Used for new-format transcripts where branches are explicit (not checkpoint/restore).
+ * Each column becomes a branch leaf under a single synthetic checkpoint.
+ */
+export function buildBranchTreeFromColumns(columns: ConversationColumn[]): BranchTree | null {
+	if (columns.length <= 1) return null;
+
+	const checkpointLabel = 'start';
+	const checkpoint: CheckpointNode = {
+		label: checkpointLabel,
+		messageIndex: 0,
+		parentCheckpointLabel: null,
+	};
+
+	const branches: BranchLeaf[] = columns.map((col, i) => ({
+		id: `col-${i}`,
+		label: col.title || `Branch ${i + 1}`,
+		isBaseline: i === 0,
+		checkpoint,
+		startIndex: 0,
+		endIndex: col.messages.length,
+		messages: col.messages,
+		sendMessageCount: countSendMessages(col.messages),
+	}));
+
+	const branchesByCheckpoint = new Map<string, BranchLeaf[]>();
+	branchesByCheckpoint.set(checkpointLabel, branches);
+
+	return {
+		sharedPrefix: [],
+		checkpoints: [checkpoint],
+		branchesByCheckpoint,
+		allBranches: branches,
+	};
+}

@@ -2,15 +2,19 @@ import type { PageServerLoad } from './$types';
 import { getGlobalCache } from '$lib/server/cache/transcript-cache';
 import { getGlobalConfig } from '$lib/server/config/app-config';
 import { loadTranscript } from '$lib/server/loaders/transcript-loader';
+import { assertAccess } from '$lib/server/access';
 import { join } from 'node:path';
 import { error } from '@sveltejs/kit';
 
-export const load: PageServerLoad = async ({ params, depends }) => {
+export const load: PageServerLoad = async ({ params, depends, locals }) => {
 	// Declare dependency for cache invalidation
 	depends('app:transcript');
-	
+
 	const config = getGlobalConfig();
 	const filePath = decodeURIComponent(params.path);
+
+	// Access control: returns 404 if user can't access this transcript
+	assertAccess(locals.username, filePath);
 	
 	try {
 		// Get cache instance

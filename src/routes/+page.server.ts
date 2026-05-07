@@ -11,15 +11,22 @@
 
 import type { PageServerLoad } from './$types';
 import { loadTranscriptMetadata } from '$lib/server/services/transcript-metadata-service';
+import { filterTranscripts, filterFolderTree } from '$lib/server/access';
 
-export const load: PageServerLoad = async ({ url, depends }) => {
+export const load: PageServerLoad = async ({ url, depends, locals }) => {
 	// Declare dependency for cache invalidation
 	depends('app:transcripts');
-	
+
 	const subPath = url.searchParams.get('path') || '';
-	
+
 	try {
 		const { data } = await loadTranscriptMetadata({ subPath });
+
+		// Filter by user's allowed paths
+		data.transcripts = filterTranscripts(locals.username, data.transcripts);
+		data.folderTree = filterFolderTree(locals.username, data.folderTree);
+		data.count = data.transcripts.length;
+
 		return data;
 		
 	} catch (error) {

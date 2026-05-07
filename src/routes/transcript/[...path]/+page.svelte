@@ -21,7 +21,7 @@ import FilterDropdown from '$lib/client/components/FilterDropdown.svelte';
 	import { collectViews, computeConversationColumns } from '$lib/client/utils/branching';
 	import { buildCitationLookup } from '$lib/client/utils/citation-utils';
 	import { collectToolFunctions } from '$lib/client/utils/tool-pairing';
-	import { hasBranchingPattern, parseBranchTree, type BranchTree } from '$lib/client/utils/branch-tree';
+	import { hasBranchingPattern, parseBranchTree, buildBranchTreeFromColumns, type BranchTree } from '$lib/client/utils/branch-tree';
 	import { onMount, setContext, tick } from 'svelte';
 	import markdownit from 'markdown-it';
 	import { Settings, User, Plus, MessageSquare, Filter as FilterIcon, Star, PanelRight, Search, Play, Command, Tag, RefreshCw, Copy, Check } from 'lucide-svelte';
@@ -41,6 +41,20 @@ import FilterDropdown from '$lib/client/components/FilterDropdown.svelte';
     const scores = judge?.scores || {} as Record<string, number>;
     const scoreDescriptions: Record<string, string> = (judge?.score_descriptions as any) || {};
     const label = (k: string) => k.replace(/_/g, ' ').replace(/\b\w/g, (m) => m.toUpperCase());
+
+    // Per-source judge summaries (e.g. scheming, debug) — only when there are multiple
+    const judgeSummaries = judge?.summaries && Object.keys(judge.summaries).length > 1
+        ? judge.summaries : null;
+
+    const SOURCE_LABELS: Record<string, string> = {
+        scheming: 'Scheming Analysis',
+        debug: 'Debug Analysis',
+        safety: 'Safety Analysis',
+        alignment: 'Alignment Analysis',
+    };
+    function formatSourceLabel(source: string): string {
+        return SOURCE_LABELS[source] || source.replace(/_/g, ' ').replace(/\b\w/g, m => m.toUpperCase());
+    }
     const scoreTitle = (k: string, v: number) => `${label(k)}: ${v.toFixed(1)}${scoreDescriptions?.[k] ? ' — ' + scoreDescriptions[k] : ''}`;
     const scoreLevel = (v: number) => v >= 7 ? 'hi' : v >= 4 ? 'mid' : 'lo';
     
@@ -249,8 +263,11 @@ import FilterDropdown from '$lib/client/components/FilterDropdown.svelte';
 		const combinedCols = computeConversationColumns(transcript.events, 'combined');
 		if (combinedCols.length === 0) return null;
 		const msgs = combinedCols[0].messages;
-		if (!hasBranchingPattern(msgs)) return null;
-		return parseBranchTree(msgs);
+		// Old format: checkpoint/restore branching within a single column
+		if (hasBranchingPattern(msgs)) return parseBranchTree(msgs);
+		// New format: explicit branches as separate columns
+		if (combinedCols.length > 1) return buildBranchTreeFromColumns(combinedCols);
+		return null;
 	});
 
 	// Message info lookup for highlights - maps message_id to { messageNumber, sourceLabel }
@@ -339,7 +356,8 @@ import FilterDropdown from '$lib/client/components/FilterDropdown.svelte';
 		get highlights() { return activeHighlights; },
 		get columns() { return columns; },
 		get currentView() { return viewParam.value; },
-		get lookup() { return citationLookup; }
+		get lookup() { return citationLookup; },
+		navigateToMessage: (messageId: string) => handleGoToMessage(messageId),
 	});
 
 	// Comments - reactive to transcript data changes
@@ -371,22 +389,65 @@ import FilterDropdown from '$lib/client/components/FilterDropdown.svelte';
 		showSlideshow = true;
 	}
 
-	// Go to message from slideshow (switch branches if needed, scroll, pulse)
+	// Find the parent assistant message for a consumed tool message
+	function findParentMessageId(targetId: string): string | null {
+		for (const col of columns) {
+			for (let i = 0; i < col.messages.length; i++) {
+				const msg = col.messages[i];
+				if ((msg as any).id === targetId && msg.role === 'tool') {
+					// Walk backwards to find the assistant message whose tool_call produced this result
+					const toolCallId = (msg as any).tool_call_id;
+					for (let j = i - 1; j >= 0; j--) {
+						const prev = col.messages[j];
+						if (prev.role === 'assistant' && (prev as any).tool_calls) {
+							if (!toolCallId || (prev as any).tool_calls.some((tc: any) => tc.id === toolCallId)) {
+								return (prev as any).id ?? null;
+							}
+						}
+					}
+				}
+			}
+		}
+		return null;
+	}
+
+	// Go to message (switch branches if needed, expand, scroll, pulse)
 	async function handleGoToMessage(messageId: string) {
-		// First, switch to the branch containing this message (if needed)
+		// If on Raw JSON view, switch to combined first
+		if (viewParam.value === SHOW_RAW || !viewParam.value) {
+			const target = sortedViewList.length > 0 ? sortedViewList[0] : 'combined';
+			viewParam.set(target);
+			for (let i = 0; i < 20; i++) {
+				await new Promise(resolve => setTimeout(resolve, 50));
+				if (singleColumnLayoutRef) break;
+			}
+		}
+
+		// Switch to the branch containing this message (if needed)
 		if (singleColumnLayoutRef) {
 			await singleColumnLayoutRef.switchToBranchContainingMessage(messageId);
 		}
 
-		// Wait for branch switch to settle
-		await new Promise(resolve => setTimeout(resolve, 50));
+		// Determine the actual DOM target (tool messages → parent assistant)
+		let domTargetId = messageId;
+		const parentId = findParentMessageId(messageId);
+		if (parentId) domTargetId = parentId;
 
-		// Find and scroll to the message
-		const element = document.querySelector(`[data-message-id="${messageId}"]`);
-		if (element) {
-			element.scrollIntoView({ behavior: 'smooth', block: 'center' });
-			element.classList.add('citation-focus');
-			setTimeout(() => element.classList.remove('citation-focus'), 2000);
+		// Expand the target message before trying to scroll
+		if (singleColumnLayoutRef) {
+			singleColumnLayoutRef.expandMessage(domTargetId);
+		}
+
+		// Wait for DOM to update, then find and scroll
+		for (let attempt = 0; attempt < 15; attempt++) {
+			await new Promise(resolve => setTimeout(resolve, 50));
+			const element = document.querySelector(`[data-message-id="${domTargetId}"]`);
+			if (element) {
+				element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+				element.classList.add('citation-focus');
+				setTimeout(() => element.classList.remove('citation-focus'), 2000);
+				return;
+			}
 		}
 	}
 
@@ -728,6 +789,7 @@ import FilterDropdown from '$lib/client/components/FilterDropdown.svelte';
 	// Reference to SingleColumnLayout for branch switching
 	let singleColumnLayoutRef: {
 		switchToBranchContainingMessage: (messageId: string) => Promise<boolean>;
+		expandMessage: (messageId: string) => void;
 	} | null = $state(null);
 
 	// Active branch state — managed at page level, shared across all tabs
@@ -1386,7 +1448,18 @@ import FilterDropdown from '$lib/client/components/FilterDropdown.svelte';
                     </div>
                     <!-- svelte-ignore a11y_no_static_element_interactions -->
                     <div class="section-content band-selectable" bind:this={summaryContentRef} onmouseup={handleBandContentMouseUp('summary', summaryContentRef)}>
-                        {#if settings.value.renderMarkdown}
+                        {#if judgeSummaries && !activeSummaryVersionId}
+                            {#each Object.entries(judgeSummaries) as [source, text]}
+                                <div class="judge-summary-source">
+                                    <h4 class="judge-summary-source-label">{formatSourceLabel(source)}</h4>
+                                    {#if settings.value.renderMarkdown}
+                                        <CitationMarkdown text={text} class="markdown-content" />
+                                    {:else}
+                                        <div class="text-pre-wrap"><CitationText text={text} /></div>
+                                    {/if}
+                                </div>
+                            {/each}
+                        {:else if settings.value.renderMarkdown}
                             <CitationMarkdown text={activeSummary} class="markdown-content" />
                         {:else}
                             <div class="text-pre-wrap"><CitationText text={activeSummary} /></div>
@@ -1448,6 +1521,7 @@ import FilterDropdown from '$lib/client/components/FilterDropdown.svelte';
 		<RightSidebar
 			comments={userComments}
 			highlights={userHighlights}
+			judgeCitations={activeHighlights}
 			{messageInfoMap}
 			currentUser={commenterName.value.name}
 			auditorModel={meta.auditor_model}
@@ -1462,6 +1536,7 @@ import FilterDropdown from '$lib/client/components/FilterDropdown.svelte';
 			onClose={() => sidebarOpen.value = { open: false }}
 			onCommentClick={scrollToComment}
 			onHighlightClick={(index) => navigateToHighlight(index)}
+			onJudgeCitationClick={(messageId) => handleGoToMessage(messageId)}
 			onPlaySlideshow={() => openSlideshow(0)}
 			onDeleteComment={handleDeleteComment}
 			onDeleteHighlight={handleDeleteHighlight}
@@ -2073,6 +2148,25 @@ import FilterDropdown from '$lib/client/components/FilterDropdown.svelte';
         border-color: var(--color-primary);
         color: var(--color-primary);
         background: var(--color-primary-bg);
+    }
+
+    .judge-summary-source {
+        margin-bottom: 1.25rem;
+    }
+
+    .judge-summary-source:last-child {
+        margin-bottom: 0;
+    }
+
+    .judge-summary-source-label {
+        font-size: 0.82rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: var(--color-accent, #9C6644);
+        margin: 0 0 0.4rem 0;
+        padding-bottom: 0.25rem;
+        border-bottom: 1px solid var(--color-border, #E8E0D5);
     }
 
     /* Version selector container */

@@ -2,7 +2,7 @@
 	import { ChevronDown, ChevronRight, Play, X, GitBranch, ArrowUp } from 'lucide-svelte';
 	import { onMount } from 'svelte';
 	import { browser } from '$app/environment';
-	import type { UserComment, UserHighlight } from '$lib/shared/types';
+	import type { UserComment, UserHighlight, Citation } from '$lib/shared/types';
 	import type { BranchTree } from '$lib/client/utils/branch-tree';
 	import SidebarCommentCard from './SidebarCommentCard.svelte';
 	import SidebarHighlightCard from './SidebarHighlightCard.svelte';
@@ -93,6 +93,7 @@
 	let {
 		comments = [],
 		highlights = [],
+		judgeCitations = [],
 		messageInfoMap = new Map<string, MessageInfo>(),
 		currentUser = '',
 		// Metadata props
@@ -109,12 +110,14 @@
 		onClose,
 		onCommentClick,
 		onHighlightClick,
+		onJudgeCitationClick,
 		onPlaySlideshow,
 		onDeleteComment,
 		onDeleteHighlight
 	}: {
 		comments?: UserComment[];
 		highlights?: UserHighlight[];
+		judgeCitations?: Citation[];
 		messageInfoMap?: Map<string, MessageInfo>;
 		currentUser?: string;
 		// Metadata props
@@ -131,6 +134,7 @@
 		onClose: () => void;
 		onCommentClick: (comment: UserComment) => void;
 		onHighlightClick: (index: number) => void;
+		onJudgeCitationClick?: (messageId: string) => void;
 		onPlaySlideshow: () => void;
 		onDeleteComment?: (id: string) => void;
 		onDeleteHighlight?: (id: string) => void;
@@ -139,6 +143,7 @@
 	let infoExpanded = $state(true);
 	let branchesExpanded = $state(true);
 	let commentsExpanded = $state(true);
+	let judgeCitationsExpanded = $state(true);
 	let highlightsExpanded = $state(true);
 
 	// Sort comments by date (oldest first)
@@ -313,7 +318,57 @@
 			{/if}
 		</section>
 
-		<!-- Highlights Section -->
+		<!-- Judge Citations Section -->
+		{#if judgeCitations.length > 0}
+			<section class="sidebar-section">
+				<button
+					type="button"
+					class="section-header"
+					onclick={() => judgeCitationsExpanded = !judgeCitationsExpanded}
+					aria-expanded={judgeCitationsExpanded}
+				>
+					{#if judgeCitationsExpanded}
+						<ChevronDown size={16} />
+					{:else}
+						<ChevronRight size={16} />
+					{/if}
+					<span class="section-title">Judge Citations ({judgeCitations.length})</span>
+				</button>
+
+				{#if judgeCitationsExpanded}
+					<div class="section-content">
+						<div class="cards-list">
+							{#each judgeCitations as citation, i}
+								{@const messageId = citation.parts?.[0]?.message_id}
+								{@const msgInfo = messageId ? messageInfoMap.get(messageId) : undefined}
+								<button
+									type="button"
+									class="judge-citation-card"
+									onclick={() => {
+										if (messageId && onJudgeCitationClick) onJudgeCitationClick(messageId);
+									}}
+								>
+									<div class="jc-header">
+										{#if msgInfo}
+											<span class="jc-msg-num">Msg {msgInfo.messageNumber}</span>
+										{/if}
+										{#if msgInfo?.sourceLabel}
+											<span class="jc-source">{msgInfo.sourceLabel}</span>
+										{/if}
+									</div>
+									<div class="jc-description">{citation.description}</div>
+									{#if citation.parts?.[0]?.quoted_text}
+										<div class="jc-quote">{citation.parts[0].quoted_text.length > 150 ? citation.parts[0].quoted_text.slice(0, 150) + '...' : citation.parts[0].quoted_text}</div>
+									{/if}
+								</button>
+							{/each}
+						</div>
+					</div>
+				{/if}
+			</section>
+		{/if}
+
+		<!-- User Highlights Section -->
 		<section class="sidebar-section">
 			<button
 				type="button"
@@ -576,4 +631,77 @@
 	}
 
 	/* Branches section styles */
+
+	/* Judge citation cards */
+	.judge-citation-card {
+		display: block;
+		width: 100%;
+		text-align: left;
+		background: var(--color-bg, #FAF7F2);
+		border: 1px solid rgb(187 247 208);
+		border-left: 3px solid rgb(34 197 94);
+		border-radius: 6px;
+		padding: 0.5rem 0.6rem;
+		margin-bottom: 0.35rem;
+		cursor: pointer;
+		transition: background 0.15s, border-color 0.15s;
+		font-family: inherit;
+	}
+
+	.judge-citation-card:hover {
+		background: rgb(240 253 244);
+		border-color: rgb(134 239 172);
+	}
+
+	:global(.dark) .judge-citation-card {
+		background: var(--color-surface-alt, #2a2a2a);
+		border-color: rgb(20 83 45);
+	}
+
+	:global(.dark) .judge-citation-card:hover {
+		background: rgb(20 83 45 / 0.3);
+	}
+
+	.jc-header {
+		display: flex;
+		align-items: center;
+		gap: 0.35rem;
+		margin-bottom: 0.25rem;
+	}
+
+	.jc-msg-num {
+		font-size: 0.7rem;
+		font-weight: 600;
+		color: rgb(22 163 74);
+		background: rgb(220 252 231);
+		padding: 0.1rem 0.35rem;
+		border-radius: 3px;
+	}
+
+	:global(.dark) .jc-msg-num {
+		color: rgb(134 239 172);
+		background: rgb(20 83 45);
+	}
+
+	.jc-source {
+		font-size: 0.65rem;
+		color: var(--color-text-muted, #8B7E6A);
+		text-transform: uppercase;
+	}
+
+	.jc-description {
+		font-size: 0.78rem;
+		color: var(--color-text, #3D3328);
+		line-height: 1.35;
+		margin-bottom: 0.2rem;
+	}
+
+	.jc-quote {
+		font-size: 0.72rem;
+		color: var(--color-text-muted, #8B7E6A);
+		font-style: italic;
+		line-height: 1.3;
+		border-left: 2px solid var(--color-border, #E8E0D5);
+		padding-left: 0.5rem;
+	}
 </style>

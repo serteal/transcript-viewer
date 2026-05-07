@@ -6,11 +6,13 @@
 import 'dotenv/config';
 import { json, error, type RequestHandler } from '@sveltejs/kit';
 import { join } from 'node:path';
-import { readFile, writeFile } from 'node:fs/promises';
 import Anthropic from '@anthropic-ai/sdk';
 import { getGlobalConfig } from '$lib/server/config/app-config';
 import { getGlobalCache } from '$lib/server/cache/transcript-cache';
 import { extractMetadata } from '$lib/shared/utils/transcript-utils';
+import { openTranscriptFile } from '$lib/server/loaders/transcript-file-io';
+import { validateLenient } from '$lib/shared/validation/transcript-validator';
+import { assertAccess } from '$lib/server/access';
 import type { SummaryVersion, UserComment, UserHighlight, Citation, Transcript, TranscriptEvent } from '$lib/shared/types';
 
 // Initialize Anthropic client (uses ANTHROPIC_API_KEY env var)
@@ -406,7 +408,7 @@ Be specific and cite the messages that support your observations.`);
 	return parts.join('\n');
 }
 
-export const POST: RequestHandler = async ({ params, request }) => {
+export const POST: RequestHandler = async ({ params, request, locals }) => {
 	try {
 		const config = getGlobalConfig();
 		const filePath = params.path;
@@ -423,6 +425,9 @@ export const POST: RequestHandler = async ({ params, request }) => {
 			throw error(400, 'Invalid file path');
 		}
 
+		// Access control
+		assertAccess(locals.username, decodedPath);
+
 		const fullPath = join(config.transcriptRootDir, decodedPath);
 
 		// Parse request body
@@ -437,11 +442,11 @@ export const POST: RequestHandler = async ({ params, request }) => {
 			thinking_level = 'off'
 		} = requestBody;
 
-		// Read current transcript
-		const content = await readFile(fullPath, 'utf-8');
-		const transcript: Transcript = JSON.parse(content);
+		// Read current transcript (format-aware)
+		const file = await openTranscriptFile(fullPath);
+		const transcript: Transcript = validateLenient(file.raw, decodedPath);
 
-		// Build the prompt
+		// Build the prompt using the normalized transcript
 		const prompt = buildPrompt(transcript, {
 			include_comments,
 			include_highlights,
@@ -501,27 +506,29 @@ export const POST: RequestHandler = async ({ params, request }) => {
 		};
 
 		// Initialize summary_versions array if needed
-		if (!transcript.metadata.summary_versions) {
-			transcript.metadata.summary_versions = [];
+		let summaryVersions: SummaryVersion[] = file.get('summary_versions') || [];
 
+		if (summaryVersions.length === 0) {
 			// Migrate existing judge summary as version 0 if it exists
-			if (transcript.metadata.judge_output?.summary) {
+			const judgeSummary = transcript.metadata.judge_output?.summary;
+			if (judgeSummary) {
 				const originalVersion: SummaryVersion = {
 					id: crypto.randomUUID(),
-					summary: transcript.metadata.judge_output.summary,
+					summary: judgeSummary,
 					created_at: transcript.metadata.created_at,
 					created_by: 'judge'
 				};
-				transcript.metadata.summary_versions.push(originalVersion);
+				summaryVersions.push(originalVersion);
 			}
 		}
 
 		// Add new version and set as active
-		transcript.metadata.summary_versions.push(newVersion);
-		transcript.metadata.active_summary_version = newVersion.id;
+		summaryVersions.push(newVersion);
+		file.set('summary_versions', summaryVersions);
+		file.set('active_summary_version', newVersion.id);
 
 		// Write back to disk
-		await writeFile(fullPath, JSON.stringify(transcript, null, 2));
+		await file.save(fullPath);
 
 		// Update cache
 		const cache = getGlobalCache({
@@ -529,14 +536,15 @@ export const POST: RequestHandler = async ({ params, request }) => {
 			enableWatching: config.cache.enableWatching,
 			watchDirectory: config.transcriptRootDir
 		});
-		const updatedMetadata = extractMetadata(transcript, decodedPath);
+		const updatedNormalized = validateLenient(file.raw, decodedPath);
+		const updatedMetadata = extractMetadata(updatedNormalized, decodedPath);
 		cache.updateTranscriptMetadata(updatedMetadata);
 		cache.invalidateFullTranscript(decodedPath);
 
 		return json({
 			success: true,
 			version: newVersion,
-			all_versions: transcript.metadata.summary_versions
+			all_versions: summaryVersions
 		});
 	} catch (err) {
 		if (err && typeof err === 'object' && 'status' in err) {

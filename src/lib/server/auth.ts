@@ -19,15 +19,34 @@ export const SESSION_MAX_AGE_SECONDS = Math.floor(SESSION_MAX_AGE_MS / 1000);
 // Users file
 // ---------------------------------------------------------------------------
 
-/** Format: { "username": "salt:hash", ... } */
-let users: Record<string, string> = {};
+/**
+ * New format: { "user": { "hash": "salt:hex", "paths": ["*"] } }
+ * Legacy format (auto-migrated on read): { "user": "salt:hex" }
+ */
+interface UserRecord {
+	hash: string;
+	/** Allowed transcript paths. ["*"] = full access. Otherwise list of filenames. */
+	paths: string[];
+}
+
+let users: Record<string, UserRecord> = {};
 
 const USERS_FILE = process.env.USERS_FILE || '/data/users.json';
 
 function loadUsers(): void {
 	try {
 		const raw = readFileSync(USERS_FILE, 'utf-8');
-		users = JSON.parse(raw);
+		const parsed = JSON.parse(raw);
+		users = {};
+		for (const [name, value] of Object.entries(parsed)) {
+			if (typeof value === 'string') {
+				// Legacy format: plain hash string → full access
+				users[name] = { hash: value, paths: ['*'] };
+			} else if (value && typeof value === 'object' && 'hash' in value) {
+				const v = value as any;
+				users[name] = { hash: v.hash, paths: Array.isArray(v.paths) ? v.paths : ['*'] };
+			}
+		}
 	} catch {
 		users = {};
 	}
@@ -93,9 +112,9 @@ setInterval(() => {
  * Verify a username/password pair against the users file.
  */
 export function verifyPassword(username: string, password: string): boolean {
-	const stored = users[username];
-	if (!stored) return false;
-	return verifyHash(password, stored);
+	const user = users[username];
+	if (!user) return false;
+	return verifyHash(password, user.hash);
 }
 
 /**
@@ -114,21 +133,49 @@ export function createSession(username: string): string {
 }
 
 /**
+ * Resolve a session ID to the username. Returns null if invalid/expired.
+ */
+export function getSessionUser(sessionId: string): string | null {
+	const session = sessions.get(sessionId);
+	if (!session) return null;
+	if (session.expiresAt < Date.now()) {
+		sessions.delete(sessionId);
+		return null;
+	}
+	if (!(session.username in users)) {
+		sessions.delete(sessionId);
+		return null;
+	}
+	return session.username;
+}
+
+/**
  * Check if a session ID is valid (exists, not expired, user still exists).
  */
 export function validateSession(sessionId: string): boolean {
-	const session = sessions.get(sessionId);
-	if (!session) return false;
-	if (session.expiresAt < Date.now()) {
-		sessions.delete(sessionId);
-		return false;
-	}
-	// If user was removed from users file, invalidate session
-	if (!(session.username in users)) {
-		sessions.delete(sessionId);
-		return false;
-	}
-	return true;
+	return getSessionUser(sessionId) !== null;
+}
+
+/**
+ * Get allowed transcript paths for a user. Returns ["*"] for full access.
+ */
+export function getUserAllowedPaths(username: string): string[] {
+	return users[username]?.paths ?? [];
+}
+
+/**
+ * Check if a user can access a specific transcript path.
+ * Deny-by-default: returns false unless explicitly allowed.
+ */
+export function canAccessTranscript(username: string, transcriptPath: string): boolean {
+	const allowed = getUserAllowedPaths(username);
+	if (allowed.includes('*')) return true;
+	// Match against the filename (with or without leading directory components)
+	const filename = transcriptPath.split('/').pop() ?? transcriptPath;
+	return allowed.some(p => {
+		const pFilename = p.split('/').pop() ?? p;
+		return pFilename === filename || p === transcriptPath;
+	});
 }
 
 /**
